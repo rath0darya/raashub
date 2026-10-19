@@ -222,7 +222,7 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
                 connection.getOutputStream().flush()
                 val reader = BufferedReader(InputStreamReader(connection.getInputStream(), StandardCharsets.ISO_8859_1))
                 val statusLine = reader.readLine() ?: throw IOException("Empty HTTP response")
-                val match = Regex("^HTTP/(\\\\d(?:\\\\.\\\\d)?)\\\\s+(\\\\d{3})").find(statusLine)
+                val match = Regex("^HTTP/(\\d(?:\\.\\d)?)\\s+(\\d{3})").find(statusLine)
                     ?: throw IOException("Unrecognised HTTP response")
                 val httpVersion = "HTTP/${match.groupValues[1]}"
                 val code = match.groupValues[2].toInt()
@@ -247,7 +247,7 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
                     }
                 } catch (_: java.net.SocketTimeoutException) { }
                 val title = Regex("(?is)<title[^>]*>(.*?)</title>").find(body.toString())
-                    ?.groupValues?.get(1)?.replace(Regex("\\\\s+"), " ")?.trim()?.take(180).orEmpty()
+                    ?.groupValues?.get(1)?.replace(Regex("\\s+"), " ")?.trim()?.take(180).orEmpty()
                 val contentType = headers["content-type"].orEmpty()
                 val server = headers["server"].orEmpty()
                 val detail = "HTTP $code • ${if (code in 200..399) "responded" else "server responded"}"

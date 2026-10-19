@@ -85,7 +85,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>): HealthReport {
     val responding = results.values.count { it.status == "Online" || it.status == "Responding" }
     return HealthReport(
         true, proxyPort,
-        "Checked ${results.size} of ${sources.size} indexed sources through local Tor SOCKS port $proxyPort. $responding responded; a failed request is not proof a site is permanently offline.",
+        "Checked ${results.size} of ${sources.size} onion URLs. $responding responded.",
         results
     )
 }
@@ -155,8 +155,8 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
                 val code = Regex("^HTTP/\\d(?:\\.\\d)?\\s+(\\d{3})").find(statusLine)?.groupValues?.get(1)?.toIntOrNull()
                     ?: throw IOException("Unrecognised HTTP response")
                 when {
-                    code in 200..399 -> HealthResult("Online", "HTTP $code • responded through Tor", checkedAt)
-                    code in 400..499 -> HealthResult("Responding", "HTTP $code • host responded through Tor", checkedAt)
+                    code in 200..399 -> HealthResult("Online", "HTTP $code • Responded", checkedAt)
+                    code in 400..499 -> HealthResult("Responding", "HTTP $code • Responded", checkedAt)
                     else -> HealthResult("Server error", "HTTP $code • host responded but returned an error", checkedAt)
                 }
             }
@@ -275,7 +275,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                     }, onOpen = { url -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } })
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
                     tab == Tab.SOURCES -> Sources(sources, search, { search = it }) { selected = it }
-                    tab == Tab.ACTIVITY -> Activity(sources.size, checking, healthReport, runHealthChecks)
+                    tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, runHealthChecks)
                     else -> Settings(healthReport)
                 }
                 Text("Developed With ♥️ AnonVox", Modifier.fillMaxWidth().padding(vertical = 8.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -414,7 +414,8 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
 }
 
 @Composable
-private fun Activity(count: Int, checking: Boolean, report: HealthReport?, onRunChecks: () -> Unit) {
+private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: HealthReport?, onRunChecks: () -> Unit) {
+    val groups = remember(sources) { groupSources(sources) }
     Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("Activity", fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Text("Health check results", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
@@ -422,7 +423,7 @@ private fun Activity(count: Int, checking: Boolean, report: HealthReport?, onRun
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Inventory2, null, tint = Color(0xFF16B8A6), modifier = Modifier.size(28.dp))
                 Spacer(Modifier.width(12.dp))
-                Column { Text("Repository import", fontWeight = FontWeight.SemiBold); Text("$count onion URLs", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column { Text("Repository import", fontWeight = FontWeight.SemiBold); Text("${sources.size} onion URLs in ${groups.size} groups", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
         Card(shape = RoundedCornerShape(18.dp)) {
@@ -441,17 +442,21 @@ private fun Activity(count: Int, checking: Boolean, report: HealthReport?, onRun
                 }
             }
         }
-        report?.results?.entries?.sortedBy { it.key }?.forEach { (url, result) ->
+        groups.filter { group -> group.urls.any { report?.results?.containsKey(it) == true } }.forEach { group ->
             Card(shape = RoundedCornerShape(14.dp)) {
-                Column(Modifier.padding(12.dp)) {
-                    Text(Uri.parse(url).host ?: url, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    StateLine("Result", result.status, when (result.status) {
-                        "Online" -> Color(0xFF16B887)
-                        "Responding" -> Color(0xFFB88922)
-                        "Server error" -> Color(0xFFE58B35)
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant
-                    })
-                    Text(result.detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(group.name, fontWeight = FontWeight.SemiBold)
+                    group.entries.filter { report?.results?.containsKey(it.url) == true }.forEach { entry ->
+                        val result = report!!.results.getValue(entry.url)
+                        Text(entry.url, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                        StateLine("Result", result.status, when (result.status) {
+                            "Online" -> Color(0xFF16B887)
+                            "Responding" -> Color(0xFFB88922)
+                            "Server error" -> Color(0xFFE58B35)
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        })
+                        Text(result.detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
         }

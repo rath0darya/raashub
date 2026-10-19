@@ -31,6 +31,11 @@ android {
 }
 
 dependencies {
+    constraints {
+        implementation("org.jetbrains.kotlin:kotlin-stdlib:2.0.21") {
+            because("The app compiler is Kotlin 2.0.21; prevent incompatible Kotlin 2.3 metadata from transitive dependencies")
+        }
+    }
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.compose.ui:ui")

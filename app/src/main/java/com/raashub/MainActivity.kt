@@ -61,8 +61,45 @@ private fun groupSources(sources: List<OnionEntry>): List<OnionGroup> =
         .map { (name, entries) -> OnionGroup(name, entries.distinctBy { it.url.lowercase() }.sortedBy { it.host.lowercase() }) }
         .sortedBy { it.name.lowercase() }
 
-private data class HealthResult(val status: String, val detail: String, val checkedAt: Long)
+private data class HealthResult(
+    val status: String,
+    val detail: String,
+    val checkedAt: Long,
+    val responseCode: Int? = null,
+    val httpVersion: String = "—",
+    val finalUrl: String = "",
+    val title: String = "",
+    val contentType: String = "",
+    val server: String = "",
+    val etag: String = "",
+    val lastModified: String = "",
+    val responseDate: String = "",
+    val setCookiePresent: Boolean = false,
+    val headers: Map<String, String> = emptyMap(),
+    val error: String = ""
+)
 private data class HealthReport(val torAvailable: Boolean, val proxyPort: Int?, val message: String, val results: Map<String, HealthResult>)
+
+private fun formatIst(timestamp: Long): String =
+    java.text.SimpleDateFormat("dd MMM yyyy, hh:mm:ss a 'IST'", java.util.Locale.ENGLISH).apply {
+        timeZone = java.util.TimeZone.getTimeZone("Asia/Kolkata")
+    }.format(java.util.Date(timestamp))
+
+private fun httpDateToIst(value: String): String = runCatching {
+    val formats = listOf(
+        "EEE, dd MMM yyyy HH:mm:ss z",
+        "EEE, dd MMM yyyy HH:mm:ss 'GMT'",
+        "EEE, dd MMM yyyy HH:mm:ss Z"
+    )
+    val date = formats.firstNotNullOfOrNull { pattern ->
+        runCatching {
+            java.text.SimpleDateFormat(pattern, java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("GMT")
+            }.parse(value)
+        }.getOrNull()
+    } ?: return value
+    formatIst(date.time)
+}.getOrDefault(value)
 
 private suspend fun checkOnionSources(sources: List<OnionEntry>): HealthReport {
     val onionSources = sources.filter { it.host.endsWith(".onion", ignoreCase = true) }.distinctBy { it.url.lowercase() }
@@ -150,8 +187,8 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
         if (scheme != "http" && scheme != "https") throw IOException("Unsupported URL scheme")
         val port = if (uri.port > 0) uri.port else if (scheme == "https") 443 else 80
         val raw = Socket()
-        raw.connect(InetSocketAddress("127.0.0.1", proxyPort), 1800)
-        raw.soTimeout = 4500
+        raw.connect(InetSocketAddress("127.0.0.1", proxyPort), 2500)
+        raw.soTimeout = 6000
         try {
             val out = raw.getOutputStream()
             out.write(byteArrayOf(5, 1, 0)); out.flush()
@@ -178,20 +215,54 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
                 ssl
             } else raw
             active.use { connection ->
-                connection.soTimeout = 4500
+                connection.soTimeout = 6000
                 val path = (uri.encodedPath?.takeIf { it.isNotEmpty() } ?: "/") + (uri.encodedQuery?.let { "?$it" } ?: "")
-                val request = "HEAD $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: RaaSHub-HealthCheck/1.0\r\nConnection: close\r\n\r\n"
+                val request = "GET $path HTTP/1.1\\r\\nHost: $host\\r\\nUser-Agent: RaaSHub-HealthCheck/1.0\\r\\nRange: bytes=0-32767\\r\\nConnection: close\\r\\n\\r\\n"
                 connection.getOutputStream().write(request.toByteArray(StandardCharsets.ISO_8859_1))
                 connection.getOutputStream().flush()
-                val statusLine = BufferedReader(InputStreamReader(connection.getInputStream(), StandardCharsets.ISO_8859_1)).readLine()
-                    ?: throw IOException("Empty HTTP response")
-                val code = Regex("^HTTP/\\d(?:\\.\\d)?\\s+(\\d{3})").find(statusLine)?.groupValues?.get(1)?.toIntOrNull()
+                val reader = BufferedReader(InputStreamReader(connection.getInputStream(), StandardCharsets.ISO_8859_1))
+                val statusLine = reader.readLine() ?: throw IOException("Empty HTTP response")
+                val match = Regex("^HTTP/(\\\\d(?:\\\\.\\\\d)?)\\\\s+(\\\\d{3})").find(statusLine)
                     ?: throw IOException("Unrecognised HTTP response")
-                when {
-                    code in 200..399 -> HealthResult("Online", "HTTP $code • Responded", checkedAt)
-                    code in 400..499 -> HealthResult("Responding", "HTTP $code • Responded", checkedAt)
-                    else -> HealthResult("Server error", "HTTP $code • host responded but returned an error", checkedAt)
+                val httpVersion = "HTTP/${match.groupValues[1]}"
+                val code = match.groupValues[2].toInt()
+                val headers = linkedMapOf<String, String>()
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (line.isEmpty()) break
+                    val split = line.indexOf(':')
+                    if (split > 0) {
+                        val name = line.substring(0, split).trim().lowercase()
+                        val value = line.substring(split + 1).trim()
+                        headers[name] = if (headers.containsKey(name)) headers.getValue(name) + ", " + value else value
+                    }
                 }
+                val body = StringBuilder()
+                val bodyBuffer = CharArray(2048)
+                try {
+                    while (body.length < 32768) {
+                        val n = reader.read(bodyBuffer, 0, minOf(bodyBuffer.size, 32768 - body.length))
+                        if (n < 0) break
+                        body.append(bodyBuffer, 0, n)
+                    }
+                } catch (_: java.net.SocketTimeoutException) { }
+                val title = Regex("(?is)<title[^>]*>(.*?)</title>").find(body.toString())
+                    ?.groupValues?.get(1)?.replace(Regex("\\\\s+"), " ")?.trim()?.take(180).orEmpty()
+                val contentType = headers["content-type"].orEmpty()
+                val server = headers["server"].orEmpty()
+                val detail = "HTTP $code • ${if (code in 200..399) "responded" else "server responded"}"
+                val status = when {
+                    code in 200..399 -> "Online"
+                    code in 400..499 -> "Responding"
+                    else -> "Server error"
+                }
+                HealthResult(
+                    status = status, detail = detail, checkedAt = checkedAt, responseCode = code,
+                    httpVersion = httpVersion, finalUrl = urlText, title = title,
+                    contentType = contentType, server = server, etag = headers["etag"].orEmpty(),
+                    lastModified = headers["last-modified"].orEmpty(), responseDate = headers["date"].orEmpty(),
+                    setCookiePresent = headers.containsKey("set-cookie"), headers = headers
+                )
             }
         } finally { runCatching { raw.close() } }
     } catch (e: Exception) {
@@ -201,7 +272,7 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
             is java.net.ConnectException -> "Connection refused or unreachable through Tor"
             else -> e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
         }
-        HealthResult("Unverified", reason, checkedAt)
+        HealthResult("Unverified", reason, checkedAt, finalUrl = urlText, error = reason)
     }
 }
 
@@ -490,23 +561,60 @@ private fun SourceCard(group: OnionGroup, onClick: () -> Unit) {
 
 @Composable
 private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack: () -> Unit, onCopy: (String) -> Unit, onOpen: (String) -> Unit) {
-    Column(Modifier.fillMaxSize().padding(18.dp)) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text("Back") }
         Text(group.name, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
         Text("${group.urls.size} URLs • ${group.categories.joinToString { it.replaceFirstChar { ch -> ch.uppercase() } }}", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 20.dp)) {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 20.dp)) {
             items(group.entries, key = { it.url }) { entry ->
                 val result = health[entry.url]
+                val statusLabel = when (result?.status) {
+                    "Online" -> "Active"
+                    "Responding" -> "Active (HTTP response)"
+                    "Server error" -> "Server error"
+                    "Unverified" -> "Unverified"
+                    else -> "Not checked"
+                }
+                val statusColor = when (result?.status) {
+                    "Online" -> Color(0xFF16B887)
+                    "Responding" -> Color(0xFFB88922)
+                    "Server error" -> Color(0xFFE58B35)
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                val host = Uri.parse(entry.url).host ?: entry.url
                 Card(shape = RoundedCornerShape(18.dp)) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(entry.url, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                        Text(host, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Text(entry.url, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                        StateLine("Available", statusLabel, statusColor)
                         if (result != null) {
-                            StateLine("Availability", result.status, when (result.status) {
-                                "Online" -> Color(0xFF16B887)
-                                "Responding" -> Color(0xFFB88922)
-                                "Server error" -> Color(0xFFE58B35)
-                                else -> MaterialTheme.colorScheme.onSurfaceVariant
-                            })
+                            Text("General", fontWeight = FontWeight.Bold)
+                            DetailLine("FQDN", host)
+                            DetailLine("Title", result.title.ifBlank { "Not provided by server" })
+                            DetailLine("Type", entry.category.replaceFirstChar { it.uppercase() })
+                            DetailLine("Slug / URL", entry.url)
+                            DetailLine("Enabled", "Enabled")
+                            DetailLine("Updated", formatIst(result.checkedAt))
+                            DetailLine("Last scrape", formatIst(result.checkedAt))
+                            Text("HTTP Response", fontWeight = FontWeight.Bold)
+                            DetailLine("Status", result.responseCode?.toString() ?: "—")
+                            DetailLine("Fetched at", formatIst(result.checkedAt))
+                            DetailLine("Start URL", entry.url)
+                            DetailLine("Final URL", result.finalUrl.ifBlank { entry.url })
+                            DetailLine("HTTP version", result.httpVersion)
+                            DetailLine("Error", result.error.ifBlank { "—" })
+                            Text("Fingerprint", fontWeight = FontWeight.Bold)
+                            DetailLine("Content type", result.contentType.ifBlank { "—" })
+                            DetailLine("Server", result.server.ifBlank { "—" })
+                            DetailLine("Set-Cookie present", result.setCookiePresent.toString())
+                            Text("Response Headers", fontWeight = FontWeight.Bold)
+                            if (result.headers.isEmpty()) DetailLine("Headers", "Not available")
+                            else result.headers.forEach { (name, value) ->
+                                DetailLine(name, if (name == "date" || name == "last-modified" || name == "expires") httpDateToIst(value) else value)
+                            }
+                            Text("Check detail: ${result.detail}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            Text("Run a live check to retrieve HTTP status, page title, server details and response headers.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick = { onCopy(entry.url) }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy") }
@@ -516,6 +624,14 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DetailLine(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
+        Text(label, Modifier.width(118.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value.ifBlank { "—" }, Modifier.weight(1f), fontSize = 12.sp)
     }
 }
 

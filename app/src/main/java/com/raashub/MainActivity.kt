@@ -722,6 +722,15 @@ private fun Sources(sources: List<OnionEntry>, victims: List<VictimEntry>, query
     } }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         OutlinedTextField(query, onQuery, Modifier.fillMaxWidth().padding(top = 12.dp), placeholder = { Text("Search group or URL") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp))
+        if (victims.isEmpty()) {
+            Card(shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Info, null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text("No victim leak records are bundled yet. Victim cards will show only source-provided leak dates, not the app discovery date.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             val filterOptions = (listOf("all", "forums") + categories).distinct()
             filterOptions.forEach { key ->
@@ -758,7 +767,7 @@ private fun SourceCard(group: OnionGroup, victims: List<VictimEntry>, onClick: (
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(group.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(group.urls.size.toString() + " onion URL" + if (group.urls.size == 1) "" else "s", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                    Text(group.urls.size.toString() + " URLs", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                     Text(group.urls.take(2).joinToString("  •  ") { Uri.parse(it).host ?: it }, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
                 Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)

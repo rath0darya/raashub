@@ -42,7 +42,7 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    implementation("info.guardianproject:tor-android:0.4.9.14")
+    implementation("info.guardianproject:tor-android:0.4.9.11")
     implementation("info.guardianproject:jtorctl:0.4.5.7")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

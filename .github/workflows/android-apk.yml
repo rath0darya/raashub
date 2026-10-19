@@ -80,4 +80,8 @@ jobs:
             exit 0
           fi
           git commit -m "Add verified RaaSHub Android APK"
+          # Other repository edits may land while Gradle is building. Rebase this
+          # APK-only commit on the latest main before pushing, rather than failing
+          # with a non-fast-forward rejection.
+          git pull --rebase origin main
           git push

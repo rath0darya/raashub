@@ -55,7 +55,7 @@ jobs:
             source="${entries[0]}"
           fi
           # Never copy repository metadata or the archive back into the root.
-          rsync -a --exclude='.git/' --exclude='raashub-main.zip' "$source"/ ./
+          rsync -a --exclude='.git/' --exclude='raashub-main.zip' --exclude='.github/workflows/**' "$source"/ ./
           # Verify that extraction produced actual files before deleting the archive.
           count=$(find . -type f ! -path './.git/*' ! -path './raashub-main.zip' | wc -l)
           test "$count" -gt 0

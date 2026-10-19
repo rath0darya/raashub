@@ -1,6 +1,14 @@
 package com.raashub
 
 import android.content.Intent
+import android.app.Activity
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.graphics.BitmapFactory
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import android.widget.Toast
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.ServiceConnection
@@ -9,6 +17,7 @@ import org.torproject.jni.TorService
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -22,9 +31,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -48,6 +68,7 @@ import java.net.Socket
 import java.nio.charset.StandardCharsets
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import java.util.concurrent.atomic.AtomicInteger
 
 private data class OnionEntry(val url: String, val entity: String, val source: String, val category: String = "other") {
     val host: String get() = runCatching { Uri.parse(url).host ?: url }.getOrDefault(url)
@@ -101,7 +122,7 @@ private fun httpDateToIst(value: String): String = runCatching {
     formatIst(date.time)
 }.getOrDefault(value)
 
-private suspend fun checkOnionSources(sources: List<OnionEntry>): HealthReport {
+private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (Int, Int) -> Unit): HealthReport {
     val onionSources = sources.filter { it.host.endsWith(".onion", ignoreCase = true) }.distinctBy { it.url.lowercase() }
     if (onionSources.isEmpty()) return HealthReport(false, null, "No onion URLs available to check.", emptyMap())
 
@@ -117,9 +138,19 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>): HealthReport {
     if (proxyPort == null) return HealthReport(false, null, "Tor proxy or Tor circuit did not become ready within 90 seconds. Check your internet connection and retry.", emptyMap())
 
     val semaphore = Semaphore(12)
+    val completed = AtomicInteger(0)
+    withContext(Dispatchers.Main) { onProgress(0, onionSources.size) }
     val results = kotlinx.coroutines.coroutineScope {
         onionSources.map { entry ->
-            async(Dispatchers.IO) { semaphore.withPermit { entry.url to checkOneOnion(entry.url, proxyPort) } }
+            async(Dispatchers.IO) {
+                semaphore.withPermit {
+                    try { entry.url to checkOneOnion(entry.url, proxyPort) }
+                    finally {
+                        val done = completed.incrementAndGet()
+                        withContext(Dispatchers.Main) { onProgress(done, onionSources.size) }
+                    }
+                }
+            }
         }.awaitAll().toMap()
     }
     val responding = results.values.count { it.status == "Online" || it.status == "Responding" }
@@ -297,6 +328,8 @@ private fun skipFully(socket: Socket, amount: Int) {
 class MainActivity : ComponentActivity() {
     private var pendingTorUrl: String? = null
     private var torBound = false
+    private val notificationChannelId = "raashub_live_monitoring"
+    private val monitoringNotificationId = 4107
     private val torConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) { }
         override fun onServiceDisconnected(name: ComponentName?) { torBound = false }
@@ -304,10 +337,52 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        createMonitoringNotificationChannel()
         runCatching {
             torBound = bindService(Intent(this, TorService::class.java), torConnection, BIND_AUTO_CREATE)
         }
         setContent { HubApp(readSources()) }
+    }
+
+    private fun createMonitoringNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(notificationChannelId, "Live monitoring", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "Progress and completion updates for RaaSHub live URL checks"
+                setShowBadge(true)
+            }
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
+    }
+
+    fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 4108)
+        }
+    }
+
+    fun showMonitoringNotification(completed: Int, total: Int, finished: Boolean, message: String = "") {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+        val title = if (finished) "Live monitoring completed" else "RaaSHub live monitoring"
+        val content = if (finished) message.ifBlank { "Checked $total onion URLs." } else "Checking URLs: $completed of $total (${if (total > 0) completed * 100 / total else 0}%)"
+        val logo = runCatching { BitmapFactory.decodeResource(resources, R.drawable.raashub_logo) }.getOrNull()
+        val notification = NotificationCompat.Builder(this, notificationChannelId)
+            .setSmallIcon(R.drawable.raashub_logo)
+            .setLargeIcon(logo)
+            .setContentTitle(title)
+            .setContentText(content)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+            .setOnlyAlertOnce(true)
+            .setOngoing(!finished)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setProgress(total.coerceAtLeast(1), completed.coerceIn(0, total.coerceAtLeast(1)), !finished && total <= 0)
+            .build()
+        runCatching { NotificationManagerCompat.from(this).notify(monitoringNotificationId, notification) }
+    }
+
+    fun openNotificationSettings() {
+        val intent = if (Build.VERSION.SDK_INT >= 26) Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+        else Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+        runCatching { startActivity(intent) }
     }
 
     fun openOnionUrl(url: String) {
@@ -394,24 +469,51 @@ private fun HubApp(sources: List<OnionEntry>) {
     var selected by remember { mutableStateOf<OnionGroup?>(null) }
     var checking by remember { mutableStateOf(false) }
     var healthReport by remember { mutableStateOf<HealthReport?>(null) }
+    var progressDone by remember { mutableIntStateOf(0) }
+    var progressTotal by remember { mutableIntStateOf(0) }
+    var lastBackPressed by remember { mutableLongStateOf(0L) }
     val scope = rememberCoroutineScope()
     val runHealthChecks: () -> Unit = {
         if (!checking) {
             checking = true
+            progressDone = 0
+            progressTotal = sources.count { it.host.endsWith(".onion", true) }
+            (context as? MainActivity)?.requestNotificationPermissionIfNeeded()
+            (context as? MainActivity)?.showMonitoringNotification(0, progressTotal, false)
             scope.launch {
-                healthReport = checkOnionSources(sources)
+                val completedReport = checkOnionSources(sources) { done, total ->
+                    progressDone = done
+                    progressTotal = total
+                    (context as? MainActivity)?.showMonitoringNotification(done, total, false)
+                }
+                healthReport = completedReport
                 checking = false
+                (context as? MainActivity)?.showMonitoringNotification(
+                    progressTotal, progressTotal, true,
+                    completedReport.message
+                )
             }
+        }
+    }
+    BackHandler(enabled = true) {
+        when {
+            selected != null -> selected = null
+            tab != Tab.HOME -> { tab = Tab.HOME; search = "" }
+            System.currentTimeMillis() - lastBackPressed < 2000L -> (context as? Activity)?.finish()
+            else -> { lastBackPressed = System.currentTimeMillis(); Toast.makeText(context, "Press back again to exit RaaSHub", Toast.LENGTH_SHORT).show() }
         }
     }
     MaterialTheme(colorScheme = scheme) {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             bottomBar = {
-                NavigationBar {
+                Column {
+                    Text("Developed With ♥️ AnonVox", Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    NavigationBar {
                     Tab.entries.forEach { t ->
                         val icon = when (t) { Tab.HOME -> Icons.Default.Dashboard; Tab.SOURCES -> Icons.Default.Hub; Tab.ACTIVITY -> Icons.Default.Timeline; Tab.SETTINGS -> Icons.Default.Settings }
                         NavigationBarItem(selected = tab == t, onClick = { tab = t; selected = null }, icon = { Icon(icon, t.title) }, label = { Text(t.title) })
+                    }
                     }
                 }
             }
@@ -419,7 +521,7 @@ private fun HubApp(sources: List<OnionEntry>) {
             Column(Modifier.fillMaxSize().padding(inset)) {
                 Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(Color(0xFF071A33), Color(0xFF172953), Color(0xFF48205E)))).padding(20.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Shield, null, tint = Color(0xFF67E9FF), modifier = Modifier.size(36.dp))
+                        androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)))
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text("RaaSHub", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
@@ -436,10 +538,9 @@ private fun HubApp(sources: List<OnionEntry>) {
                     }, onOpen = { url -> if (context is MainActivity) context.openOnionUrl(url) else runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage("org.torproject.torbrowser")) } })
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
                     tab == Tab.SOURCES -> Sources(sources, search, { search = it }, sourceFilter, { sourceFilter = it }) { selected = it }
-                    tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, runHealthChecks)
-                    else -> Settings(healthReport)
+                    tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, progressDone, progressTotal, runHealthChecks)
+                    else -> Settings(healthReport, sources.size) { (context as? MainActivity)?.openNotificationSettings() } 
                 }
-                Text("Developed With ♥️ AnonVox", Modifier.fillMaxWidth().padding(vertical = 8.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -636,7 +737,7 @@ private fun DetailLine(label: String, value: String) {
 }
 
 @Composable
-private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: HealthReport?, onRunChecks: () -> Unit) {
+private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: HealthReport?, progressDone: Int, progressTotal: Int, onRunChecks: () -> Unit) {
     val groups = remember(sources) { groupSources(sources) }
     Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("Activity", fontSize = 24.sp, fontWeight = FontWeight.Bold)
@@ -650,11 +751,25 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
         }
         Card(shape = RoundedCornerShape(18.dp)) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.PendingActions, null, tint = Color(0xFFB58AFF), modifier = Modifier.size(28.dp))
+                val pulse = rememberInfiniteTransition(label = "monitoringPulse")
+                val rotation by pulse.animateFloat(initialValue = 0f, targetValue = if (checking) 360f else 0f, animationSpec = infiniteRepeatable(animation = tween(1800, easing = LinearEasing), repeatMode = RepeatMode.Restart), label = "monitoringRotation")
+                Icon(Icons.Default.PendingActions, null, tint = Color(0xFFB58AFF), modifier = Modifier.size(28.dp).rotate(rotation))
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Live monitoring", fontWeight = FontWeight.SemiBold)
                     Text(if (checking) "Health checks are running…" else report?.message?.takeIf { report.torAvailable } ?: "No live checks yet.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (checking) {
+                        val percent = if (progressTotal > 0) progressDone * 100 / progressTotal else 0
+                        Spacer(Modifier.height(12.dp))
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("$percent%", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.weight(1f))
+                            Text("$progressDone / $progressTotal URLs", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        LinearProgressIndicator(progress = { if (progressTotal > 0) progressDone.toFloat() / progressTotal else 0f }, modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape))
+                        Spacer(Modifier.height(4.dp))
+                        Text("Please keep RaaSHub open for the most reliable check.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     Spacer(Modifier.height(10.dp))
                     Button(onClick = onRunChecks, enabled = !checking && sources.isNotEmpty()) {
                         if (checking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.PlayArrow, null)
@@ -686,16 +801,60 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
 }
 
 @Composable
-private fun Settings(report: HealthReport?) {
-    Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Text("Settings", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        Card(shape = RoundedCornerShape(18.dp)) {
-            Column(Modifier.padding(16.dp)) {
-                Text("Theme", fontWeight = FontWeight.SemiBold)
-                Text("Follows Android system light/dark appearance.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                HorizontalDivider(Modifier.padding(vertical = 12.dp))
-                Text("RaaSHub 1.0.0", fontWeight = FontWeight.SemiBold)
-                Text(if (report?.torAvailable == false) "Network route unavailable" else "Health checks are available from Home and Activity.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun Settings(report: HealthReport?, sourceCount: Int, onNotificationSettings: () -> Unit) {
+    val context = LocalContext.current
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        item { Text("Settings", fontSize = 26.sp, fontWeight = FontWeight.Bold) }
+        item {
+            Card(shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                            Icon(Icons.Default.Palette, null, Modifier.padding(10.dp), tint = MaterialTheme.colorScheme.primary)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column { Text("Appearance", fontWeight = FontWeight.SemiBold); Text("Follows Android system light/dark appearance and dynamic colours.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
+                    HorizontalDivider(Modifier.padding(vertical = 14.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.NotificationsActive, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(26.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Monitoring notifications", fontWeight = FontWeight.SemiBold)
+                            Text("Get start, progress and completion updates while URL checks run.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(onClick = onNotificationSettings) { Text("Manage") }
+                    }
+                    HorizontalDivider(Modifier.padding(vertical = 14.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Security, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(26.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column { Text("Privacy & routing", fontWeight = FontWeight.SemiBold); Text("Live onion checks route through the local Tor SOCKS proxy. No external CTI backend is configured.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
+                }
+            }
+        }
+        item {
+            Card(shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Intelligence sources", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                    StateLine("Indexed URLs", sourceCount.toString(), MaterialTheme.colorScheme.primary)
+                    StateLine("Last network check", report?.let { if (it.torAvailable) "Completed" else "Unavailable" } ?: "Not run", MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("The source index is bundled with the app and can be browsed offline. Live status requires Tor connectivity.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedButton(onClick = { runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/rath0darya/raashub"))) } }, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Code, null); Spacer(Modifier.width(8.dp)); Text("Project repository")
+                    }
+                }
+            }
+        }
+        item {
+            Card(shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("About RaaSHub", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                    Text("Cyber Threat Intelligence companion", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Version 1.0.0", fontSize = 12.sp)
+                    Text("Developed With ♥️ AnonVox", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                }
             }
         }
     }

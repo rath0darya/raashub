@@ -45,6 +45,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -78,6 +80,81 @@ private data class OnionGroup(val name: String, val entries: List<OnionEntry>) {
     val urls: List<String> get() = entries.map { it.url }.distinct()
     val categories: Set<String> get() = entries.map { it.category }.toSet()
 }
+private data class VictimEntry(
+    val group: String, val name: String, val country: String, val countryCode: String,
+    val leakDate: String, val sector: String, val website: String
+)
+private fun jsonText(item: org.json.JSONObject, vararg keys: String): String =
+    keys.firstNotNullOfOrNull { key -> item.optString(key).takeIf { it.isNotBlank() && it != "null" } }.orEmpty()
+
+private fun parseVictims(raw: String): List<VictimEntry> = runCatching {
+    val root = org.json.JSONTokener(raw).nextValue()
+    val array = when (root) {
+        is JSONArray -> root
+        is org.json.JSONObject -> root.optJSONArray("victims") ?: root.optJSONArray("data") ?: root.optJSONArray("records") ?: JSONArray()
+        else -> JSONArray()
+    }
+    buildList {
+        for (i in 0 until array.length()) {
+            val item = array.optJSONObject(i) ?: continue
+            val name = jsonText(item, "victim", "victim_name", "company", "company_name", "name", "title")
+            val group = jsonText(item, "group", "group_name", "ransomware_group", "threat_actor", "actor")
+            if (name.isBlank() || group.isBlank()) continue
+            add(VictimEntry(group, name, jsonText(item, "country", "victim_country", "location"),
+                jsonText(item, "country_code", "countryCode", "iso2", "iso_code").lowercase(),
+                jsonText(item, "leak_date", "leakDate", "published_date", "publication_date", "date_discovered", "discovered", "date"),
+                jsonText(item, "sector", "industry", "victim_sector", "organization_type"),
+                jsonText(item, "website", "domain", "url", "company_website")))
+        }
+    }.distinctBy { (it.group + "|" + it.name).lowercase() }
+}.getOrDefault(emptyList())
+
+private fun countryIso2(country: String, providedCode: String): String {
+    if (providedCode.matches(Regex("^[a-z]{2}$"))) return providedCode
+    return mapOf("united states" to "us", "usa" to "us", "united states of america" to "us",
+        "united kingdom" to "gb", "uk" to "gb", "great britain" to "gb", "india" to "in",
+        "canada" to "ca", "australia" to "au", "germany" to "de", "france" to "fr",
+        "italy" to "it", "spain" to "es", "brazil" to "br", "japan" to "jp", "china" to "cn",
+        "russia" to "ru", "ukraine" to "ua", "netherlands" to "nl", "switzerland" to "ch",
+        "sweden" to "se", "norway" to "no", "poland" to "pl", "turkey" to "tr", "türkiye" to "tr",
+        "israel" to "il", "south korea" to "kr", "singapore" to "sg", "mexico" to "mx",
+        "argentina" to "ar", "south africa" to "za", "new zealand" to "nz", "ireland" to "ie",
+        "belgium" to "be", "austria" to "at", "portugal" to "pt", "denmark" to "dk",
+        "finland" to "fi", "czech republic" to "cz", "czechia" to "cz", "romania" to "ro",
+        "indonesia" to "id", "malaysia" to "my", "thailand" to "th", "vietnam" to "vn",
+        "philippines" to "ph", "saudi arabia" to "sa", "united arab emirates" to "ae", "uae" to "ae")[country.trim().lowercase()].orEmpty()
+}
+
+@Composable
+private fun RemoteImage(url: String, modifier: Modifier = Modifier, description: String? = null) {
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, key1 = url) {
+        value = if (url.isBlank()) null else withContext(Dispatchers.IO) {
+            runCatching {
+                val connection = java.net.URL(url).openConnection().apply {
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                    setRequestProperty("User-Agent", "RaaSHub-Android/1.0")
+                }
+                connection.getInputStream().use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
+            }.getOrNull()
+        }
+    }
+    if (bitmap != null) androidx.compose.foundation.Image(bitmap = bitmap!!, contentDescription = description, modifier = modifier, contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+    else Box(modifier, contentAlignment = Alignment.Center) { Icon(Icons.Default.Business, contentDescription = description, tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+}
+
+private fun faviconUrl(website: String): String {
+    val raw = website.trim()
+    if (raw.isBlank()) return ""
+    val host = runCatching { Uri.parse(if (raw.startsWith("http", true)) raw else "https://" + raw).host }
+        .getOrNull()?.takeIf { !it.endsWith(".onion", true) } ?: return ""
+    return "https://www.google.com/s2/favicons?domain=" + host + "&sz=128"
+}
+private fun flagUrl(country: String, countryCode: String): String {
+    val code = countryIso2(country, countryCode)
+    return if (code.isBlank()) "" else "https://flagcdn.com/w80/" + code + ".png"
+}
+
 private fun groupSources(sources: List<OnionEntry>): List<OnionGroup> =
     sources.groupBy { it.entity.trim().ifBlank { it.host } }
         .map { (name, entries) -> OnionGroup(name, entries.distinctBy { it.url.lowercase() }.sortedBy { it.host.lowercase() }) }
@@ -334,7 +411,7 @@ class MainActivity : ComponentActivity() {
         runCatching {
             torBound = bindService(Intent(this, TorService::class.java), torConnection, BIND_AUTO_CREATE)
         }
-        setContent { HubApp(readSources()) }
+        setContent { HubApp(readSources(), readVictims()) }
     }
 
     private fun createMonitoringNotificationChannel() {
@@ -433,6 +510,8 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    private fun readVictims(): List<VictimEntry> = runCatching { assets.open("victims.json").bufferedReader().use { parseVictims(it.readText()) } }.getOrDefault(emptyList())
+
     private fun readSources(): List<OnionEntry> = runCatching {
         val array = JSONArray(assets.open("onion_sources.json").bufferedReader().use { it.readText() })
         buildList {
@@ -450,7 +529,7 @@ class MainActivity : ComponentActivity() {
 private enum class Tab(val title: String) { HOME("Home"), SOURCES("Sources"), ACTIVITY("Activity"), SETTINGS("Settings") }
 
 @Composable
-private fun HubApp(sources: List<OnionEntry>) {
+private fun HubApp(sources: List<OnionEntry>, victims: List<VictimEntry>) {
     val context = LocalContext.current
     val themePrefs = remember { context.getSharedPreferences("raashub_appearance_prefs", android.content.Context.MODE_PRIVATE) }
     var darkMode by remember { mutableStateOf(themePrefs.getBoolean("dark_mode", true)) }
@@ -557,7 +636,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                         cm.setPrimaryClip(android.content.ClipData.newPlainText("RaaSHub onion URL", url))
                     }, onOpen = { url -> if (context is MainActivity) context.openOnionUrl(url) else runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage("org.torproject.torbrowser")) } })
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
-                    tab == Tab.SOURCES -> Sources(sources, search, { search = it }, sourceFilter, { sourceFilter = it }) { selected = it }
+                    tab == Tab.SOURCES -> Sources(sources, victims, search, { search = it }, sourceFilter, { sourceFilter = it }) { selected = it }
                     tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, progressDone, progressTotal, runHealthChecks)
                     else -> Settings(healthReport, sources.size, darkMode, { enabled -> darkMode = enabled; themePrefs.edit().putBoolean("dark_mode", enabled).apply() }) { (context as? MainActivity)?.openNotificationSettings() } 
                 }
@@ -629,7 +708,7 @@ private fun StateLine(label: String, value: String, tint: Color) {
 }
 
 @Composable
-private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) -> Unit, sourceFilter: String, onFilter: (String) -> Unit, onSelect: (OnionGroup) -> Unit) {
+private fun Sources(sources: List<OnionEntry>, victims: List<VictimEntry>, query: String, onQuery: (String) -> Unit, sourceFilter: String, onFilter: (String) -> Unit, onSelect: (OnionGroup) -> Unit) {
     val groups = remember(sources) { groupSources(sources) }
     val categories = remember(sources) { sources.map { it.category.lowercase() }.distinct().sorted() }
     val filtered = remember(groups, query, sourceFilter) { groups.filter { group ->
@@ -665,27 +744,57 @@ private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) 
         if (filtered.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (sources.isEmpty()) "No sources available." else "No matching sources") }
         } else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
-            items(filtered, key = { it.name }) { SourceCard(it) { onSelect(it) } }
+            items(filtered, key = { it.name }) { group -> SourceCard(group, victims.filter { it.group.equals(group.name, true) }) { onSelect(group) } }
         }
     }
 }
 
 @Composable
-private fun SourceCard(group: OnionGroup, onClick: () -> Unit) {
+private fun SourceCard(group: OnionGroup, victims: List<VictimEntry>, onClick: () -> Unit) {
     Card(Modifier.fillMaxWidth().clickable(onClick = onClick), shape = RoundedCornerShape(17.dp)) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFF8B69E8).copy(alpha = .15f)) { Icon(Icons.Default.Language, null, Modifier.padding(9.dp), tint = Color(0xFF9B80FF)) }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(group.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("${group.urls.size} onion URL${if (group.urls.size == 1) "" else "s"}", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-                Text(group.urls.take(2).joinToString("  •  ") { Uri.parse(it).host ?: it }, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Column(Modifier.fillMaxWidth()) {
+            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFF8B69E8).copy(alpha = .15f)) { Icon(Icons.Default.Language, null, Modifier.padding(9.dp), tint = Color(0xFF9B80FF)) }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(group.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(group.urls.size.toString() + " onion URL" + if (group.urls.size == 1) "" else "s", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                    Text(group.urls.take(2).joinToString("  •  ") { Uri.parse(it).host ?: it }, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (victims.isNotEmpty()) {
+                HorizontalDivider(Modifier.padding(horizontal = 12.dp))
+                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Victims reported (" + victims.size + ")", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                    victims.take(4).forEach { victim -> VictimCard(victim) }
+                    if (victims.size > 4) Text("+ " + (victims.size - 4) + " more victims", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
     }
 }
 
+@Composable
+private fun VictimCard(victim: VictimEntry) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(13.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))) {
+        Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surface), contentAlignment = Alignment.Center) {
+                RemoteImage(faviconUrl(victim.website), Modifier.fillMaxSize().padding(4.dp), victim.name + " company logo")
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(victim.name, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val flag = flagUrl(victim.country, victim.countryCode)
+                    if (flag.isNotBlank()) RemoteImage(flag, Modifier.width(25.dp).height(17.dp), victim.country + " flag")
+                    Text("Victim country: " + victim.country.ifBlank { "Not reported" }, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("Leak date: " + victim.leakDate.ifBlank { "Not reported by source" }, fontSize = 11.sp)
+                Text("Sector: " + victim.sector.ifBlank { "Not reported" }, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
 @Composable
 private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack: () -> Unit, onCopy: (String) -> Unit, onOpen: (String) -> Unit) {
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {

@@ -1,0 +1,78 @@
+name: Unpack repository archive
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "raashub-main.zip"
+      - ".github/workflows/unpack-repository.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Safely extract archive and verify files
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="raashub-main.zip"
+          test -s "$archive"
+          mkdir -p /tmp/raashub-unpack
+          python3 - <<'PY'
+          from pathlib import PurePosixPath
+          from zipfile import ZipFile
+          from pathlib import Path
+          archive = Path("raashub-main.zip")
+          target = Path("/tmp/raashub-unpack").resolve()
+          with ZipFile(archive) as zf:
+              entries = zf.infolist()
+              if not entries:
+                  raise SystemExit("Archive is empty")
+              for item in entries:
+                  name = item.filename.replace("\\", "/")
+                  p = PurePosixPath(name)
+                  if p.is_absolute() or ".." in p.parts:
+                      raise SystemExit(f"Unsafe archive path: {item.filename}")
+                  destination = (target / name).resolve()
+                  if target not in destination.parents and destination != target:
+                      raise SystemExit(f"Archive path escapes extraction folder: {item.filename}")
+              zf.extractall(target)
+          PY
+          # Strip the common GitHub-generated top-level folder when present.
+          source="/tmp/raashub-unpack"
+          shopt -s nullglob dotglob
+          entries=("$source"/*)
+          if [ "${#entries[@]}" -eq 1 ] && [ -d "${entries[0]}" ]; then
+            source="${entries[0]}"
+          fi
+          # Never copy repository metadata or the archive back into the root.
+          rsync -a --exclude='.git/' --exclude='raashub-main.zip' "$source"/ ./
+          # Verify that extraction produced actual files before deleting the archive.
+          count=$(find . -type f ! -path './.git/*' ! -path './raashub-main.zip' | wc -l)
+          test "$count" -gt 0
+          echo "Extracted and verified $count repository files."
+          # Delete only after extraction and verification have both succeeded.
+          rm -- "$archive"
+
+      - name: Commit extracted files and remove archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No extracted changes to commit."
+            exit 0
+          fi
+          git commit -m "Extract repository archive and remove ZIP"
+          git push

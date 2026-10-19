@@ -21,7 +21,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -450,13 +451,14 @@ private enum class Tab(val title: String) { HOME("Home"), SOURCES("Sources"), AC
 
 @Composable
 private fun HubApp(sources: List<OnionEntry>) {
-    val dark = isSystemInDarkTheme()
     val context = LocalContext.current
+    val themePrefs = remember { context.getSharedPreferences("raashub_appearance_prefs", android.content.Context.MODE_PRIVATE) }
+    var darkMode by remember { mutableStateOf(themePrefs.getBoolean("dark_mode", true)) }
     val notificationPrefs = remember { context.getSharedPreferences("raashub_notification_prefs", android.content.Context.MODE_PRIVATE) }
     var showNotificationPrompt by remember { mutableStateOf(Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !notificationPrefs.getBoolean("prompt_shown", false)) }
     val scheme = if (android.os.Build.VERSION.SDK_INT >= 31) {
-        if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-    } else if (dark) darkColorScheme(primary = Color(0xFF6CE8FF), secondary = Color(0xFFB39BFF), background = Color(0xFF0A1020), surface = Color(0xFF141D32))
+        if (darkMode) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    } else if (darkMode) darkColorScheme(primary = Color(0xFF6CE8FF), secondary = Color(0xFFB39BFF), background = Color(0xFF0A1020), surface = Color(0xFF141D32))
     else lightColorScheme(primary = Color(0xFF006A83), secondary = Color(0xFF6553A5))
     var tab by remember { mutableStateOf(Tab.HOME) }
     var search by remember { mutableStateOf("") }
@@ -539,7 +541,7 @@ private fun HubApp(sources: List<OnionEntry>) {
             Column(Modifier.fillMaxSize().padding(inset)) {
                 Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.tertiaryContainer))).padding(20.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)))
+                        androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size(52.dp).clip(RoundedCornerShape(14.dp)).background(Color.Black), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text("RaaSHub", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
@@ -557,7 +559,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
                     tab == Tab.SOURCES -> Sources(sources, search, { search = it }, sourceFilter, { sourceFilter = it }) { selected = it }
                     tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, progressDone, progressTotal, runHealthChecks)
-                    else -> Settings(healthReport, sources.size) { (context as? MainActivity)?.openNotificationSettings() } 
+                    else -> Settings(healthReport, sources.size, darkMode, { enabled -> darkMode = enabled; themePrefs.edit().putBoolean("dark_mode", enabled).apply() }) { (context as? MainActivity)?.openNotificationSettings() } 
                 }
             }
         }
@@ -631,18 +633,24 @@ private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) 
     val groups = remember(sources) { groupSources(sources) }
     val categories = remember(sources) { sources.map { it.category.lowercase() }.distinct().sorted() }
     val filtered = remember(groups, query, sourceFilter) { groups.filter { group ->
-        val matchesFilter = sourceFilter == "all" || group.categories.any { it.equals(sourceFilter, true) }
+        val isForum = group.name.contains("forum", true) || group.categories.any { it.contains("forum", true) } || group.urls.any { Uri.parse(it).host.orEmpty().contains("forum", true) }
+        val matchesFilter = when (sourceFilter) {
+            "all" -> true
+            "forums" -> isForum
+            else -> group.categories.any { it.equals(sourceFilter, true) }
+        }
         matchesFilter && (query.isBlank() || group.name.contains(query, true) || group.urls.any { it.contains(query, true) })
     } }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         OutlinedTextField(query, onQuery, Modifier.fillMaxWidth().padding(top = 12.dp), placeholder = { Text("Search group or URL") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp))
-        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val filterOptions = listOf("all") + categories
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val filterOptions = (listOf("all", "forums") + categories).distinct()
             filterOptions.forEach { key ->
                 val label = when (key) {
                     "all" -> "All"
                     "group" -> "Groups"
                     "market" -> "Markets"
+                    "forums" -> "Forums"
                     "other" -> "Other"
                     else -> key.replace("-", " ").replaceFirstChar { it.uppercase() }
                 }
@@ -840,7 +848,7 @@ private fun SkeletonSourceCard() {
 }
 
 @Composable
-private fun Settings(report: HealthReport?, sourceCount: Int, onNotificationSettings: () -> Unit) {
+private fun Settings(report: HealthReport?, sourceCount: Int, darkMode: Boolean, onDarkModeChange: (Boolean) -> Unit, onNotificationSettings: () -> Unit) {
     val context = LocalContext.current
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("Settings", fontSize = 26.sp, fontWeight = FontWeight.Bold) }
@@ -852,7 +860,12 @@ private fun Settings(report: HealthReport?, sourceCount: Int, onNotificationSett
                             Icon(Icons.Default.Palette, null, Modifier.padding(10.dp), tint = MaterialTheme.colorScheme.primary)
                         }
                         Spacer(Modifier.width(12.dp))
-                        Column { Text("Appearance", fontWeight = FontWeight.SemiBold); Text("Follows Android system light/dark appearance and dynamic colours.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        Column(Modifier.weight(1f)) {
+                            Text("Appearance", fontWeight = FontWeight.SemiBold)
+                            Text(if (darkMode) "Dark mode is enabled." else "Light mode is enabled.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Choose the app theme; default is dark.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
                     }
                     HorizontalDivider(Modifier.padding(vertical = 14.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -880,9 +893,6 @@ private fun Settings(report: HealthReport?, sourceCount: Int, onNotificationSett
                     StateLine("Indexed URLs", sourceCount.toString(), MaterialTheme.colorScheme.primary)
                     StateLine("Last network check", report?.let { if (it.torAvailable) "Completed" else "Unavailable" } ?: "Not run", MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("The source index is bundled with the app and can be browsed offline. Live status requires Tor connectivity.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    OutlinedButton(onClick = { runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/rath0darya/raashub"))) } }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.Code, null); Spacer(Modifier.width(8.dp)); Text("Project repository")
-                    }
                 }
             }
         }

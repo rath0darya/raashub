@@ -1,0 +1,84 @@
+name: Build RaaSHub Android APK
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "Download/**"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Generate offline onion source index
+        run: python3 scripts/build_android_source_index.py
+
+      - name: Install original app logo
+        run: |
+          set -euo pipefail
+          test -s assets/images/raashub-logo.png
+          mkdir -p app/src/main/res/drawable-nodpi
+          cp assets/images/raashub-logo.png app/src/main/res/drawable-nodpi/raashub_logo.png
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Copy and verify APK in repository Download folder
+        run: |
+          set -euo pipefail
+          source_apk="app/build/outputs/apk/debug/app-debug.apk"
+          destination="Download/RaaSHub.apk"
+          test -s "$source_apk"
+          mkdir -p Download
+          cp "$source_apk" "$destination"
+          test -s "$destination"
+          sha256sum "$destination"
+          ls -lh "$destination"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RaaSHub-Android-APK
+          path: Download/RaaSHub.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit APK to repository
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Download/RaaSHub.apk
+          if git diff --cached --quiet; then
+            echo "APK unchanged; no commit needed."
+            exit 0
+          fi
+          git commit -m "Add verified RaaSHub Android APK"
+          git push

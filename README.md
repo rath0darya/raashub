@@ -18,9 +18,9 @@ RaaSHub is a **native Android app built with Kotlin and Jetpack Compose**. This 
 
 The app uses native Android Compose UI. It does not use a WebView for its interface and does not require Node.js, JavaScript, Python, or Termux at runtime. JSON files hold directory data; the Python script is only a build-time utility that prepares the bundled source index.
 
-The current interface provides an overview, searchable source directory, source details and provenance, copy/open actions, an activity snapshot, and system-adaptive light/dark appearance. The source index generator scans retained JSON, TXT, and CSV files, normalizes and deduplicates onion URLs, and keeps source-file provenance.
+The current interface provides an overview, searchable source groups, all URLs within each group, copy/open actions, live health-check results grouped by source, an activity screen, and system-adaptive light/dark appearance. The source index generator scans retained JSON, TXT, and CSV files, normalizes and deduplicates onion URLs, and groups URLs by their source entity. File paths are kept out of the user-facing screens.
 
-**Security and availability limits:** an entry in the dataset does not prove a site is online, trustworthy, or safe. Live health checking and integrated Tor transport are not yet implemented. Opening an onion address requires a compatible Tor-capable browser or another configured Tor route; RaaSHub does not claim to route all device traffic through Tor. The app does not use an external backend or cloud database.
+The app bundles the Guardian Project Tor Android runtime and starts it automatically for onion health checks. A source result reflects only the moment checked; it does not certify a site's trustworthiness or safety. The app checks up to 10 URLs per run and does not claim to route all device traffic through Tor.
 
 ## Build the debug APK
 

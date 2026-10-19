@@ -49,6 +49,16 @@ jobs:
           test -s assets/images/raashub-logo.png
           mkdir -p app/src/main/res/drawable-nodpi
           cp assets/images/raashub-logo.png app/src/main/res/drawable-nodpi/raashub_logo.png
+          python3 -m pip install --quiet Pillow
+          python3 - <<'PY'
+          from PIL import Image
+          from pathlib import Path
+          icon = Path("app/src/main/res/drawable-nodpi/raashub_logo.png")
+          artwork = Image.open(icon).convert("RGBA")
+          background = Image.new("RGBA", artwork.size, (0, 0, 0, 255))
+          background.alpha_composite(artwork)
+          background.convert("RGB").save(icon, format="PNG", optimize=True)
+          PY
 
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug

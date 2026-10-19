@@ -1,6 +1,7 @@
 package com.raashub
 
 import android.content.Intent
+import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.ServiceConnection
 import android.os.IBinder
@@ -162,8 +163,7 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
             }
         } finally { runCatching { raw.close() } }
     } catch (e: Exception) {
-        val message = if (e is java.net.SocketTimeoutException) "Timed out through Tor" else (e.message ?: "Connection failed").take(120)
-        HealthResult("Unverified", message, checkedAt)
+        HealthResult("Unverified", "Could not verify availability", checkedAt)
     }
 }
 
@@ -216,6 +216,32 @@ class MainActivity : ComponentActivity() {
             }
         }.distinctBy { it.url.lowercase() }.sortedBy { it.host.lowercase() }
     }.getOrDefault(emptyList())
+}
+
+private fun openInTorBrowser(context: android.content.Context, url: String) {
+    val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        setPackage("org.torproject.torbrowser")
+    }
+    try {
+        context.startActivity(browserIntent)
+    } catch (_: ActivityNotFoundException) {
+        val marketIntent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("market://details?id=org.torproject.torbrowser")
+        )
+        try {
+            context.startActivity(marketIntent)
+        } catch (_: Exception) {
+            runCatching {
+                context.startActivity(
+                    Intent(
+                        Intent.ACTION_VIEW,
+                        Uri.parse("https://play.google.com/store/apps/details?id=org.torproject.torbrowser")
+                    )
+                )
+            }
+        }
+    }
 }
 
 private enum class Tab(val title: String) { HOME("Home"), SOURCES("Sources"), ACTIVITY("Activity"), SETTINGS("Settings") }
@@ -272,7 +298,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                     selected != null -> Detail(selected!!, healthReport?.results.orEmpty(), onBack = { selected = null }, onCopy = { url ->
                         val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                         cm.setPrimaryClip(android.content.ClipData.newPlainText("RaaSHub onion URL", url))
-                    }, onOpen = { url -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } })
+                    }, onOpen = { url -> openInTorBrowser(context, url) })
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
                     tab == Tab.SOURCES -> Sources(sources, search, { search = it }) { selected = it }
                     tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, runHealthChecks)
@@ -433,7 +459,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                     Text("Live monitoring", fontWeight = FontWeight.SemiBold)
                     Text(if (checking) "Health checks are running…" else report?.message?.takeIf { report.torAvailable } ?: "No live checks yet.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(10.dp))
-                    Button(onClick = onRunChecks, enabled = !checking && count > 0) {
+                    Button(onClick = onRunChecks, enabled = !checking && sources.isNotEmpty()) {
                         if (checking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.PlayArrow, null)
                         Spacer(Modifier.width(6.dp))
                         Text(if (checking) "Checking…" else "Run health checks")

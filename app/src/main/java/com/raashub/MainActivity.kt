@@ -49,11 +49,12 @@ import java.nio.charset.StandardCharsets
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
-private data class OnionEntry(val url: String, val entity: String, val source: String) {
+private data class OnionEntry(val url: String, val entity: String, val source: String, val category: String = "other") {
     val host: String get() = runCatching { Uri.parse(url).host ?: url }.getOrDefault(url)
 }
 private data class OnionGroup(val name: String, val entries: List<OnionEntry>) {
     val urls: List<String> get() = entries.map { it.url }.distinct()
+    val categories: Set<String> get() = entries.map { it.category }.toSet()
 }
 private fun groupSources(sources: List<OnionEntry>): List<OnionGroup> =
     sources.groupBy { it.entity.trim().ifBlank { it.host } }
@@ -64,29 +65,30 @@ private data class HealthResult(val status: String, val detail: String, val chec
 private data class HealthReport(val torAvailable: Boolean, val proxyPort: Int?, val message: String, val results: Map<String, HealthResult>)
 
 private suspend fun checkOnionSources(sources: List<OnionEntry>): HealthReport {
-    val proxyPort = withContext(Dispatchers.IO) {
-        var port = findTorSocksProxy()
-        var waited = 0
-        while (port == null && waited < 90000) {
-            Thread.sleep(1000)
-            waited += 1000
-            port = findTorSocksProxy()
-        }
-        port
-    }
-    if (proxyPort == null) return HealthReport(false, null, "Tor could not connect.", emptyMap())
-    if (sources.isEmpty()) return HealthReport(true, proxyPort, "No onion URLs available to check.", emptyMap())
+    val onionSources = sources.filter { it.host.endsWith(".onion", ignoreCase = true) }.distinctBy { it.url.lowercase() }
+    if (onionSources.isEmpty()) return HealthReport(false, null, "No onion URLs available to check.", emptyMap())
 
-    val semaphore = Semaphore(4)
+    val proxyPort = withContext(Dispatchers.IO) {
+        val deadline = System.currentTimeMillis() + 90000L
+        while (System.currentTimeMillis() < deadline) {
+            val port = findTorSocksProxy()
+            if (port != null && isTorCircuitReady(port)) return@withContext port
+            Thread.sleep(1500)
+        }
+        null
+    }
+    if (proxyPort == null) return HealthReport(false, null, "Tor proxy or Tor circuit did not become ready within 90 seconds. Check your internet connection and retry.", emptyMap())
+
+    val semaphore = Semaphore(12)
     val results = kotlinx.coroutines.coroutineScope {
-        sources.take(10).map { entry ->
+        onionSources.map { entry ->
             async(Dispatchers.IO) { semaphore.withPermit { entry.url to checkOneOnion(entry.url, proxyPort) } }
         }.awaitAll().toMap()
     }
     val responding = results.values.count { it.status == "Online" || it.status == "Responding" }
     return HealthReport(
         true, proxyPort,
-        "Checked ${results.size} of ${sources.size} onion URLs. $responding responded.",
+        "Checked all ${results.size} onion URLs. $responding responded; ${results.size - responding} could not be confirmed.",
         results
     )
 }
@@ -113,7 +115,7 @@ private fun isTorCircuitReady(proxyPort: Int): Boolean {
                 else -> return false
             }
             skipFully(socket, 2)
-            val request = "HEAD / HTTP/1.1\\r\\nHost: check.torproject.org\\r\\nConnection: close\\r\\n\\r\\n"
+            val request = "HEAD / HTTP/1.1\r\nHost: check.torproject.org\r\nConnection: close\r\n\r\n"
             out.write(request.toByteArray(StandardCharsets.ISO_8859_1)); out.flush()
             val status = BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.ISO_8859_1)).readLine()
             status?.startsWith("HTTP/") == true
@@ -149,7 +151,7 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
         val port = if (uri.port > 0) uri.port else if (scheme == "https") 443 else 80
         val raw = Socket()
         raw.connect(InetSocketAddress("127.0.0.1", proxyPort), 1800)
-        raw.soTimeout = 6500
+        raw.soTimeout = 4500
         try {
             val out = raw.getOutputStream()
             out.write(byteArrayOf(5, 1, 0)); out.flush()
@@ -176,7 +178,7 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
                 ssl
             } else raw
             active.use { connection ->
-                connection.soTimeout = 6500
+                connection.soTimeout = 4500
                 val path = (uri.encodedPath?.takeIf { it.isNotEmpty() } ?: "/") + (uri.encodedQuery?.let { "?$it" } ?: "")
                 val request = "HEAD $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: RaaSHub-HealthCheck/1.0\r\nConnection: close\r\n\r\n"
                 connection.getOutputStream().write(request.toByteArray(StandardCharsets.ISO_8859_1))
@@ -193,7 +195,13 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
             }
         } finally { runCatching { raw.close() } }
     } catch (e: Exception) {
-        HealthResult("Unverified", "Could not verify availability", checkedAt)
+        val reason = when (e) {
+            is java.net.SocketTimeoutException -> "Timed out through Tor"
+            is javax.net.ssl.SSLException -> "TLS/HTTPS handshake failed"
+            is java.net.ConnectException -> "Connection refused or unreachable through Tor"
+            else -> e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+        }
+        HealthResult("Unverified", reason, checkedAt)
     }
 }
 
@@ -311,6 +319,7 @@ private fun HubApp(sources: List<OnionEntry>) {
     else lightColorScheme(primary = Color(0xFF006A83), secondary = Color(0xFF6553A5))
     var tab by remember { mutableStateOf(Tab.HOME) }
     var search by remember { mutableStateOf("") }
+    var sourceFilter by remember { mutableStateOf("all") }
     var selected by remember { mutableStateOf<OnionGroup?>(null) }
     var checking by remember { mutableStateOf(false) }
     var healthReport by remember { mutableStateOf<HealthReport?>(null) }
@@ -355,7 +364,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                         cm.setPrimaryClip(android.content.ClipData.newPlainText("RaaSHub onion URL", url))
                     }, onOpen = { url -> if (context is MainActivity) context.openOnionUrl(url) else runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage("org.torproject.torbrowser")) } })
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
-                    tab == Tab.SOURCES -> Sources(sources, search, { search = it }) { selected = it }
+                    tab == Tab.SOURCES -> Sources(sources, search, { search = it }, sourceFilter, { sourceFilter = it }) { selected = it }
                     tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, runHealthChecks)
                     else -> Settings(healthReport)
                 }
@@ -371,7 +380,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Metric("ONION URLS", sources.size.toString(), Icons.Default.Hub, Modifier.weight(1f))
+                Metric("ONION URLS", sources.count { it.host.endsWith(".onion", true) }.toString(), Icons.Default.Hub, Modifier.weight(1f))
                 Metric("GROUPS", groups.size.toString(), Icons.Default.Groups, Modifier.weight(1f))
             }
         }
@@ -387,7 +396,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
                     Button(onClick = onRunChecks, enabled = !checking && sources.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
                         if (checking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.NetworkCheck, null)
                         Spacer(Modifier.width(8.dp))
-                        Text(if (checking) "Checking sources…" else "Run live checks (up to 10)")
+                        Text(if (checking) "Checking all onion URLs…" else "Check all onion URLs")
                     }
                 }
             }
@@ -428,12 +437,29 @@ private fun StateLine(label: String, value: String, tint: Color) {
 }
 
 @Composable
-private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) -> Unit, onSelect: (OnionGroup) -> Unit) {
+private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) -> Unit, sourceFilter: String, onFilter: (String) -> Unit, onSelect: (OnionGroup) -> Unit) {
     val groups = remember(sources) { groupSources(sources) }
-    val filtered = remember(groups, query) { groups.filter { group -> query.isBlank() || group.name.contains(query, true) || group.urls.any { it.contains(query, true) } } }
+    val categories = remember(sources) { sources.map { it.category.lowercase() }.distinct().sorted() }
+    val filtered = remember(groups, query, sourceFilter) { groups.filter { group ->
+        val matchesFilter = sourceFilter == "all" || group.categories.any { it.equals(sourceFilter, true) }
+        matchesFilter && (query.isBlank() || group.name.contains(query, true) || group.urls.any { it.contains(query, true) })
+    } }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         OutlinedTextField(query, onQuery, Modifier.fillMaxWidth().padding(top = 12.dp), placeholder = { Text("Search group or URL") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp))
-        Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val filterOptions = listOf("all") + categories
+            filterOptions.forEach { key ->
+                val label = when (key) {
+                    "all" -> "All"
+                    "group" -> "Groups"
+                    "market" -> "Markets"
+                    "other" -> "Other"
+                    else -> key.replace("-", " ").replaceFirstChar { it.uppercase() }
+                }
+                FilterChip(selected = sourceFilter == key, onClick = { onFilter(key) }, label = { Text(label) })
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("${filtered.size} groups", fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
             Text("${filtered.sumOf { it.urls.size }} URLs", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -503,7 +529,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Inventory2, null, tint = Color(0xFF16B8A6), modifier = Modifier.size(28.dp))
                 Spacer(Modifier.width(12.dp))
-                Column { Text("Source index", fontWeight = FontWeight.SemiBold); Text("${sources.size} onion URLs in ${groups.size} groups", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column { Text("Source index", fontWeight = FontWeight.SemiBold); Text("${sources.count { it.host.endsWith(".onion", true) }} onion URLs and ${sources.size - sources.count { it.host.endsWith(".onion", true) }} clear-web URLs in ${groups.size} groups", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
         Card(shape = RoundedCornerShape(18.dp)) {

@@ -290,8 +290,10 @@ class MainActivity : ComponentActivity() {
         buildList {
             for (i in 0 until array.length()) {
                 val item = array.optJSONObject(i) ?: continue
-                val url = item.optString("url")
-                if (url.contains(".onion", true)) add(OnionEntry(url, item.optString("entity", "Unnamed source"), item.optString("source", "Source list")))
+                var url = item.optString("url").trim()
+                if (url.isBlank()) continue
+                if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) url = "http://$url"
+                add(OnionEntry(url, item.optString("entity", "Unnamed source"), item.optString("source", "Source list"), item.optString("category", "other").lowercase()))
             }
         }.distinctBy { it.url.lowercase() }.sortedBy { it.host.lowercase() }
     }.getOrDefault(emptyList())

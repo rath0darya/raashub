@@ -91,6 +91,36 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>): HealthReport {
     )
 }
 
+private fun isTorCircuitReady(proxyPort: Int): Boolean {
+    return try {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress("127.0.0.1", proxyPort), 1200)
+            socket.soTimeout = 3500
+            val out = socket.getOutputStream()
+            out.write(byteArrayOf(5, 1, 0)); out.flush()
+            val greeting = ByteArray(2); readFully(socket, greeting)
+            if (greeting[0].toInt() != 5 || greeting[1].toInt() != 0) return false
+            val host = "check.torproject.org".toByteArray(StandardCharsets.US_ASCII)
+            out.write(byteArrayOf(5, 1, 0, 3, host.size.toByte()))
+            out.write(host)
+            out.write(byteArrayOf(0, 80)); out.flush()
+            val reply = ByteArray(4); readFully(socket, reply)
+            if (reply[0].toInt() != 5 || reply[1].toInt() != 0) return false
+            when (reply[3].toInt() and 0xff) {
+                1 -> skipFully(socket, 4)
+                3 -> { val length = socket.getInputStream().read(); if (length < 0) return false; skipFully(socket, length) }
+                4 -> skipFully(socket, 16)
+                else -> return false
+            }
+            skipFully(socket, 2)
+            val request = "HEAD / HTTP/1.1\\r\\nHost: check.torproject.org\\r\\nConnection: close\\r\\n\\r\\n"
+            out.write(request.toByteArray(StandardCharsets.ISO_8859_1)); out.flush()
+            val status = BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.ISO_8859_1)).readLine()
+            status?.startsWith("HTTP/") == true
+        }
+    } catch (_: Exception) { false }
+}
+
 private fun findTorSocksProxy(): Int? {
     for (port in listOf(9050, 9150)) {
         try {
@@ -202,6 +232,10 @@ class MainActivity : ComponentActivity() {
     }
 
     fun openOnionUrl(url: String) {
+        if (!Uri.parse(url).host.orEmpty().endsWith(".onion", ignoreCase = true)) {
+            runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            return
+        }
         pendingTorUrl = url
         try {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
@@ -359,7 +393,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
         item {
             Card(Modifier.fillMaxWidth().clickable(onClick = onExplore), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
                 Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) { Text("Explore sources", fontWeight = FontWeight.Bold); Text("Browse grouped onion URLs.", fontSize = 12.sp) }
+                    Column(Modifier.weight(1f)) { Text("Explore sources", fontWeight = FontWeight.Bold); Text("Browse groups, markets and their onion/clear-web URLs.", fontSize = 12.sp) }
                     Icon(Icons.Default.ArrowForward, null)
                 }
             }
@@ -396,7 +430,7 @@ private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) 
     val groups = remember(sources) { groupSources(sources) }
     val filtered = remember(groups, query) { groups.filter { group -> query.isBlank() || group.name.contains(query, true) || group.urls.any { it.contains(query, true) } } }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        OutlinedTextField(query, onQuery, Modifier.fillMaxWidth().padding(top = 12.dp), placeholder = { Text("Search group or onion URL") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp))
+        OutlinedTextField(query, onQuery, Modifier.fillMaxWidth().padding(top = 12.dp), placeholder = { Text("Search group or URL") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp))
         Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("${filtered.size} groups", fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
@@ -431,7 +465,7 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
     Column(Modifier.fillMaxSize().padding(18.dp)) {
         TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text("Back") }
         Text(group.name, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
-        Text("${group.urls.size} onion URLs", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("${group.urls.size} URLs • ${group.categories.joinToString { it.replaceFirstChar { ch -> ch.uppercase() } }}", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 20.dp)) {
             items(group.entries, key = { it.url }) { entry ->
                 val result = health[entry.url]

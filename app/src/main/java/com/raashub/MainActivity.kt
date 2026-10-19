@@ -137,7 +137,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     }
     if (proxyPort == null) return HealthReport(false, null, "Tor proxy or Tor circuit did not become ready within 90 seconds. Check your internet connection and retry.", emptyMap())
 
-    val semaphore = Semaphore(12)
+    val semaphore = Semaphore(24)
     val completed = AtomicInteger(0)
     withContext(Dispatchers.Main) { onProgress(0, onionSources.size) }
     val results = kotlinx.coroutines.coroutineScope {
@@ -218,8 +218,8 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
         if (scheme != "http" && scheme != "https") throw IOException("Unsupported URL scheme")
         val port = if (uri.port > 0) uri.port else if (scheme == "https") 443 else 80
         val raw = Socket()
-        raw.connect(InetSocketAddress("127.0.0.1", proxyPort), 2500)
-        raw.soTimeout = 6000
+        raw.connect(InetSocketAddress("127.0.0.1", proxyPort), 1500)
+        raw.soTimeout = 3500
         try {
             val out = raw.getOutputStream()
             out.write(byteArrayOf(5, 1, 0)); out.flush()
@@ -246,9 +246,9 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
                 ssl
             } else raw
             active.use { connection ->
-                connection.soTimeout = 6000
+                connection.soTimeout = 3500
                 val path = (uri.encodedPath?.takeIf { it.isNotEmpty() } ?: "/") + (uri.encodedQuery?.let { "?$it" } ?: "")
-                val request = "GET $path HTTP/1.1\\r\\nHost: $host\\r\\nUser-Agent: RaaSHub-HealthCheck/1.0\\r\\nRange: bytes=0-32767\\r\\nConnection: close\\r\\n\\r\\n"
+                val request = "GET $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: RaaSHub-HealthCheck/1.0\r\nRange: bytes=0-32767\r\nConnection: close\r\n\r\n"
                 connection.getOutputStream().write(request.toByteArray(StandardCharsets.ISO_8859_1))
                 connection.getOutputStream().flush()
                 val reader = BufferedReader(InputStreamReader(connection.getInputStream(), StandardCharsets.ISO_8859_1))
@@ -268,17 +268,9 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
                         headers[name] = if (headers.containsKey(name)) headers.getValue(name) + ", " + value else value
                     }
                 }
-                val body = StringBuilder()
-                val bodyBuffer = CharArray(2048)
-                try {
-                    while (body.length < 32768) {
-                        val n = reader.read(bodyBuffer, 0, minOf(bodyBuffer.size, 32768 - body.length))
-                        if (n < 0) break
-                        body.append(bodyBuffer, 0, n)
-                    }
-                } catch (_: java.net.SocketTimeoutException) { }
-                val title = Regex("(?is)<title[^>]*>(.*?)</title>").find(body.toString())
-                    ?.groupValues?.get(1)?.replace(Regex("\\s+"), " ")?.trim()?.take(180).orEmpty()
+                // Fast health-check mode reads response headers only. Avoid downloading
+                // page bodies from hundreds of slow onion services during status scans.
+                val title = ""
                 val contentType = headers["content-type"].orEmpty()
                 val server = headers["server"].orEmpty()
                 val detail = "HTTP $code • ${if (code in 200..399) "responded" else "server responded"}"
@@ -366,7 +358,7 @@ class MainActivity : ComponentActivity() {
         val content = if (finished) message.ifBlank { "Checked $total onion URLs." } else "Checking URLs: $completed of $total (${if (total > 0) completed * 100 / total else 0}%)"
         val logo = runCatching { BitmapFactory.decodeResource(resources, R.drawable.raashub_logo) }.getOrNull()
         val notification = NotificationCompat.Builder(this, notificationChannelId)
-            .setSmallIcon(R.drawable.raashub_logo)
+            .setSmallIcon(R.drawable.raashub_notification)
             .setLargeIcon(logo)
             .setContentTitle(title)
             .setContentText(content)
@@ -375,6 +367,7 @@ class MainActivity : ComponentActivity() {
             .setOngoing(!finished)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setProgress(total.coerceAtLeast(1), completed.coerceIn(0, total.coerceAtLeast(1)), !finished && total <= 0)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
         runCatching { NotificationManagerCompat.from(this).notify(monitoringNotificationId, notification) }
     }
@@ -459,6 +452,8 @@ private enum class Tab(val title: String) { HOME("Home"), SOURCES("Sources"), AC
 private fun HubApp(sources: List<OnionEntry>) {
     val dark = isSystemInDarkTheme()
     val context = LocalContext.current
+    val notificationPrefs = remember { context.getSharedPreferences("raashub_notification_prefs", android.content.Context.MODE_PRIVATE) }
+    var showNotificationPrompt by remember { mutableStateOf(Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !notificationPrefs.getBoolean("prompt_shown", false)) }
     val scheme = if (android.os.Build.VERSION.SDK_INT >= 31) {
         if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     } else if (dark) darkColorScheme(primary = Color(0xFF6CE8FF), secondary = Color(0xFFB39BFF), background = Color(0xFF0A1020), surface = Color(0xFF141D32))
@@ -504,6 +499,30 @@ private fun HubApp(sources: List<OnionEntry>) {
         }
     }
     MaterialTheme(colorScheme = scheme) {
+        if (showNotificationPrompt) {
+            AlertDialog(
+                onDismissRequest = {
+                    showNotificationPrompt = false
+                    notificationPrefs.edit().putBoolean("prompt_shown", true).apply()
+                },
+                icon = { Icon(Icons.Default.NotificationsActive, null, tint = MaterialTheme.colorScheme.primary) },
+                title = { Text("Enable RaaSHub notifications?") },
+                text = { Text("Allow notifications to see live-monitoring progress, percentage updates, and when checks finish. Android will show its permission dialog next.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showNotificationPrompt = false
+                        notificationPrefs.edit().putBoolean("prompt_shown", true).apply()
+                        (context as? MainActivity)?.requestNotificationPermissionIfNeeded()
+                    }) { Text("Allow notifications") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        showNotificationPrompt = false
+                        notificationPrefs.edit().putBoolean("prompt_shown", true).apply()
+                    }) { Text("Not now") }
+                }
+            )
+        }
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             bottomBar = {

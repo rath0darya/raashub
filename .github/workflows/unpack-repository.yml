@@ -59,7 +59,7 @@ jobs:
           # Verify that extraction produced actual files before deleting the archive.
           count=$(find . -type f ! -path './.git/*' ! -path './raashub-main.zip' | wc -l)
           test "$count" -gt 0
-          echo "Extracted and verified $count repository files."
+          echo "Extracted and verified $count repository files (workflow files are preserved separately to avoid requiring elevated workflow-token permissions)."
           # Delete only after extraction and verification have both succeeded.
           rm -- "$archive"
 

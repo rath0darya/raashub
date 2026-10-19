@@ -1,6 +1,10 @@
 package com.raashub
 
 import android.content.Intent
+import android.content.ComponentName
+import android.content.ServiceConnection
+import android.os.IBinder
+import org.torproject.jni.TorService
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -32,6 +36,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.io.BufferedReader
@@ -58,12 +63,17 @@ private data class HealthResult(val status: String, val detail: String, val chec
 private data class HealthReport(val torAvailable: Boolean, val proxyPort: Int?, val message: String, val results: Map<String, HealthResult>)
 
 private suspend fun checkOnionSources(sources: List<OnionEntry>): HealthReport {
-    val proxyPort = findTorSocksProxy()
-    if (proxyPort == null) return HealthReport(
-        false, null,
-        "Tor SOCKS proxy not found on 127.0.0.1:9050 or :9150. Start a Tor service such as Orbot with a local SOCKS proxy, then run checks again.",
-        emptyMap()
-    )
+    val proxyPort = withContext(Dispatchers.IO) {
+        var port = findTorSocksProxy()
+        var waited = 0
+        while (port == null && waited < 90000) {
+            Thread.sleep(1000)
+            waited += 1000
+            port = findTorSocksProxy()
+        }
+        port
+    }
+    if (proxyPort == null) return HealthReport(false, null, "Tor could not connect.", emptyMap())
     if (sources.isEmpty()) return HealthReport(true, proxyPort, "Tor SOCKS proxy detected, but there are no indexed onion sources to check.", emptyMap())
 
     val semaphore = Semaphore(4)
@@ -176,9 +186,24 @@ private fun skipFully(socket: Socket, amount: Int) {
 }
 
 class MainActivity : ComponentActivity() {
+    private var torBound = false
+    private val torConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) { }
+        override fun onServiceDisconnected(name: ComponentName?) { torBound = false }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        runCatching {
+            torBound = bindService(Intent(this, TorService::class.java), torConnection, BIND_AUTO_CREATE)
+        }
         setContent { HubApp(readSources()) }
+    }
+
+    override fun onDestroy() {
+        if (torBound) runCatching { unbindService(torConnection) }
+        torBound = false
+        super.onDestroy()
     }
 
     private fun readSources(): List<OnionEntry> = runCatching {

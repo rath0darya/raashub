@@ -33,6 +33,9 @@ android {
 dependencies {
     constraints {
         implementation("org.jetbrains.kotlin:kotlin-stdlib:2.0.21") {
+            version {
+                strictly("2.0.21")
+            }
             because("The app compiler is Kotlin 2.0.21; prevent incompatible Kotlin 2.3 metadata from transitive dependencies")
         }
     }

@@ -98,5 +98,18 @@ jobs:
           # Other repository edits may land while Gradle is building. Rebase this
           # APK-only commit on the latest main before pushing, rather than failing
           # with a non-fast-forward rejection.
-          git pull --rebase origin main
+          if ! git pull --rebase origin main; then
+            # The APK is a binary file, so simultaneous APK builds can conflict
+            # while replaying the APK-only commit. Rebase abort + soft reset keeps
+            # this build's generated APK staged on the newest main commit.
+            git rebase --abort
+            git fetch origin main
+            git reset --soft origin/main
+            git add Download/RaaSHub.apk
+            if git diff --cached --quiet; then
+              echo "APK already matches the latest main; no commit needed."
+              exit 0
+            fi
+            git commit -m "Add verified RaaSHub Android APK"
+          fi
           git push

@@ -779,6 +779,9 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                 }
             }
         }
+        if (checking && report?.results.isNullOrEmpty()) {
+            repeat(3) { SkeletonSourceCard() }
+        }
         groups.filter { group -> group.urls.any { report?.results?.containsKey(it) == true } }.forEach { group ->
             Card(shape = RoundedCornerShape(14.dp)) {
                 Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -796,6 +799,24 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SkeletonSourceCard() {
+    val transition = rememberInfiniteTransition(label = "skeletonPulse")
+    val alpha by transition.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 0.72f,
+        animationSpec = infiniteRepeatable(animation = tween(850, easing = LinearEasing), repeatMode = RepeatMode.Reverse),
+        label = "skeletonAlpha"
+    )
+    Card(shape = RoundedCornerShape(16.dp)) {
+        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.fillMaxWidth(0.58f).height(16.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)).graphicsLayer { this.alpha = alpha })
+            Box(Modifier.fillMaxWidth(0.92f).height(11.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)).graphicsLayer { this.alpha = alpha })
+            Box(Modifier.fillMaxWidth(0.72f).height(11.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)).graphicsLayer { this.alpha = alpha })
         }
     }
 }

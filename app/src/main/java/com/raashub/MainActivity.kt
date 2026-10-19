@@ -473,7 +473,6 @@ private fun HubApp(sources: List<OnionEntry>) {
             checking = true
             progressDone = 0
             progressTotal = sources.count { it.host.endsWith(".onion", true) }
-            (context as? MainActivity)?.requestNotificationPermissionIfNeeded()
             (context as? MainActivity)?.showMonitoringNotification(0, progressTotal, false)
             scope.launch {
                 val completedReport = checkOnionSources(sources) { done, total ->
@@ -538,17 +537,17 @@ private fun HubApp(sources: List<OnionEntry>) {
             }
         ) { inset ->
             Column(Modifier.fillMaxSize().padding(inset)) {
-                Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(Color(0xFF071A33), Color(0xFF172953), Color(0xFF48205E)))).padding(20.dp)) {
+                Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.tertiaryContainer))).padding(20.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)))
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("RaaSHub", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
-                            Text("CYBER THREAT INTELLIGENCE", color = Color(0xFFAEDCF8), fontSize = 10.sp, letterSpacing = 1.2.sp)
+                            Text("RaaSHub", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+                            Text("CYBER THREAT INTELLIGENCE", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, letterSpacing = 1.2.sp)
                         }
                     }
                     Spacer(Modifier.height(16.dp))
-                    Text("Know your threat landscape.", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                    Text("Know your threat landscape.", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                 }
                 when {
                     selected != null -> Detail(selected!!, healthReport?.results.orEmpty(), onBack = { selected = null }, onCopy = { url ->

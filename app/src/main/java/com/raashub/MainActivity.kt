@@ -709,7 +709,7 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
                         if (result != null) {
                             Text("General", fontWeight = FontWeight.Bold)
                             DetailLine("FQDN", host)
-                            DetailLine("Title", result.title.ifBlank { "Not provided by server" })
+                            DetailLine("Title", result.title.ifBlank { "Skipped in fast status check" })
                             DetailLine("Type", entry.category.replaceFirstChar { it.uppercase() })
                             DetailLine("Slug / URL", entry.url)
                             DetailLine("Enabled", "Enabled")

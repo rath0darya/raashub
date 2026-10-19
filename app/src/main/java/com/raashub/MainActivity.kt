@@ -74,7 +74,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>): HealthReport {
         port
     }
     if (proxyPort == null) return HealthReport(false, null, "Tor could not connect.", emptyMap())
-    if (sources.isEmpty()) return HealthReport(true, proxyPort, "Tor SOCKS proxy detected, but there are no indexed onion sources to check.", emptyMap())
+    if (sources.isEmpty()) return HealthReport(true, proxyPort, "No onion URLs available to check.", emptyMap())
 
     val semaphore = Semaphore(4)
     val results = kotlinx.coroutines.coroutineScope {
@@ -212,7 +212,7 @@ class MainActivity : ComponentActivity() {
             for (i in 0 until array.length()) {
                 val item = array.optJSONObject(i) ?: continue
                 val url = item.optString("url")
-                if (url.contains(".onion", true)) add(OnionEntry(url, item.optString("entity", "Repository source"), item.optString("source", "Repository data")))
+                if (url.contains(".onion", true)) add(OnionEntry(url, item.optString("entity", "Unnamed source"), item.optString("source", "Source list")))
             }
         }.distinctBy { it.url.lowercase() }.sortedBy { it.host.lowercase() }
     }.getOrDefault(emptyList())
@@ -299,7 +299,6 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
                 Column(Modifier.padding(18.dp)) {
                     Text("Intelligence snapshot", fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
-                    StateLine("Repository ingestion", "Loaded", Color(0xFF16B887))
                     StateLine("Live onion availability", report?.let { "${it.results.size} checked" } ?: "Not checked", MaterialTheme.colorScheme.onSurfaceVariant)
                     StateLine("Network route", when { checking -> "Checking…"; report?.torAvailable == true -> "Connected"; report != null -> "Unavailable"; else -> "Not checked" }, MaterialTheme.colorScheme.onSurfaceVariant)
                     if (report?.torAvailable == false) Text("Live checks unavailable", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -359,7 +358,7 @@ private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) 
             Text("${filtered.sumOf { it.urls.size }} URLs", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (filtered.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (sources.isEmpty()) "Source index unavailable in this build." else "No matching sources") }
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (sources.isEmpty()) "No sources available." else "No matching sources") }
         } else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
             items(filtered, key = { it.name }) { SourceCard(it) { onSelect(it) } }
         }
@@ -423,7 +422,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Inventory2, null, tint = Color(0xFF16B8A6), modifier = Modifier.size(28.dp))
                 Spacer(Modifier.width(12.dp))
-                Column { Text("Repository import", fontWeight = FontWeight.SemiBold); Text("${sources.size} onion URLs in ${groups.size} groups", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column { Text("Source index", fontWeight = FontWeight.SemiBold); Text("${sources.size} onion URLs in ${groups.size} groups", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
         Card(shape = RoundedCornerShape(18.dp)) {

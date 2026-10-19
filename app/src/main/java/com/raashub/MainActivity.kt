@@ -46,6 +46,13 @@ import javax.net.ssl.SSLSocketFactory
 private data class OnionEntry(val url: String, val entity: String, val source: String) {
     val host: String get() = runCatching { Uri.parse(url).host ?: url }.getOrDefault(url)
 }
+private data class OnionGroup(val name: String, val entries: List<OnionEntry>) {
+    val urls: List<String> get() = entries.map { it.url }.distinct()
+}
+private fun groupSources(sources: List<OnionEntry>): List<OnionGroup> =
+    sources.groupBy { it.entity.trim().ifBlank { it.host } }
+        .map { (name, entries) -> OnionGroup(name, entries.distinctBy { it.url.lowercase() }.sortedBy { it.host.lowercase() }) }
+        .sortedBy { it.name.lowercase() }
 
 private data class HealthResult(val status: String, val detail: String, val checkedAt: Long)
 private data class HealthReport(val torAvailable: Boolean, val proxyPort: Int?, val message: String, val results: Map<String, HealthResult>)
@@ -198,7 +205,7 @@ private fun HubApp(sources: List<OnionEntry>) {
     else lightColorScheme(primary = Color(0xFF006A83), secondary = Color(0xFF6553A5))
     var tab by remember { mutableStateOf(Tab.HOME) }
     var search by remember { mutableStateOf("") }
-    var selected by remember { mutableStateOf<OnionEntry?>(null) }
+    var selected by remember { mutableStateOf<OnionGroup?>(null) }
     var checking by remember { mutableStateOf(false) }
     var healthReport by remember { mutableStateOf<HealthReport?>(null) }
     val scope = rememberCoroutineScope()
@@ -232,16 +239,14 @@ private fun HubApp(sources: List<OnionEntry>) {
                             Text("RaaSHub", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
                             Text("CYBER THREAT INTELLIGENCE", color = Color(0xFFAEDCF8), fontSize = 10.sp, letterSpacing = 1.2.sp)
                         }
-                        Surface(color = Color(0xFF0FB98A).copy(alpha = .2f), shape = CircleShape) { Text("LOCAL", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color(0xFF9AF2D1), fontSize = 10.sp, fontWeight = FontWeight.Bold) }
                     }
                     Spacer(Modifier.height(16.dp))
                     Text("Know your threat landscape.", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                    Text("Repository-sourced intelligence. Stored on this device.", color = Color(0xFFCAD7EF), fontSize = 12.sp)
                 }
                 when {
-                    selected != null -> Detail(selected!!, healthReport?.results?.get(selected!!.url), onBack = { selected = null }, onCopy = { url ->
+                    selected != null -> Detail(selected!!, healthReport?.results.orEmpty(), onBack = { selected = null }, onCopy = { url ->
                         val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        cm.setPrimaryClip(android.content.ClipData.newPlainText("RaaSHub onion source", url))
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("RaaSHub onion URL", url))
                     }, onOpen = { url -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } })
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
                     tab == Tab.SOURCES -> Sources(sources, search, { search = it }) { selected = it }
@@ -256,11 +261,12 @@ private fun HubApp(sources: List<OnionEntry>) {
 
 @Composable
 private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthReport?, onRunChecks: () -> Unit, onExplore: () -> Unit) {
+    val groups = remember(sources) { groupSources(sources) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Metric("ONION SOURCES", sources.size.toString(), Icons.Default.Hub, Modifier.weight(1f))
-                Metric("ENTITIES", sources.map { it.entity }.distinct().size.toString(), Icons.Default.Groups, Modifier.weight(1f))
+                Metric("ONION URLS", sources.size.toString(), Icons.Default.Hub, Modifier.weight(1f))
+                Metric("GROUPS", groups.size.toString(), Icons.Default.Groups, Modifier.weight(1f))
             }
         }
         item {
@@ -270,8 +276,8 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
                     Spacer(Modifier.height(10.dp))
                     StateLine("Repository ingestion", "Loaded", Color(0xFF16B887))
                     StateLine("Live onion availability", report?.let { "${it.results.size} checked" } ?: "Not checked", MaterialTheme.colorScheme.onSurfaceVariant)
-                    StateLine("Network route", when { checking -> "Checking…"; report?.torAvailable == true -> "Tor proxy detected"; report != null -> "Tor unavailable"; else -> "Not checked" }, MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(if (checking) "Checking the local Tor proxy and up to 10 onion sources…" else report?.message ?: "Live checks have not run yet. Checks require a local Tor SOCKS proxy.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    StateLine("Network route", when { checking -> "Checking…"; report?.torAvailable == true -> "Connected"; report != null -> "Unavailable"; else -> "Not checked" }, MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (report?.torAvailable == false) Text("Live checks unavailable", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(10.dp))
                     Button(onClick = onRunChecks, enabled = !checking && sources.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
                         if (checking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.NetworkCheck, null)
@@ -284,13 +290,13 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
         item {
             Card(Modifier.fillMaxWidth().clickable(onClick = onExplore), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
                 Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) { Text("Explore repository sources", fontWeight = FontWeight.Bold); Text("Search URLs and inspect their source file.", fontSize = 12.sp) }
+                    Column(Modifier.weight(1f)) { Text("Explore sources", fontWeight = FontWeight.Bold); Text("Browse grouped onion URLs.", fontSize = 12.sp) }
                     Icon(Icons.Default.ArrowForward, null)
                 }
             }
         }
-        item { Text("Source preview", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
-        items(sources.take(5)) { SourceCard(it) { onExplore() } }
+        item { Text("Source groups", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+        items(groups.take(5)) { SourceCard(it) { onExplore() } }
     }
 }
 
@@ -317,33 +323,34 @@ private fun StateLine(label: String, value: String, tint: Color) {
 }
 
 @Composable
-private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) -> Unit, onSelect: (OnionEntry) -> Unit) {
-    val filtered = remember(sources, query) { sources.filter { query.isBlank() || it.url.contains(query, true) || it.entity.contains(query, true) || it.source.contains(query, true) } }
+private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) -> Unit, onSelect: (OnionGroup) -> Unit) {
+    val groups = remember(sources) { groupSources(sources) }
+    val filtered = remember(groups, query) { groups.filter { group -> query.isBlank() || group.name.contains(query, true) || group.urls.any { it.contains(query, true) } } }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        OutlinedTextField(query, onQuery, Modifier.fillMaxWidth().padding(top = 12.dp), placeholder = { Text("Search URL, entity or file") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp))
+        OutlinedTextField(query, onQuery, Modifier.fillMaxWidth().padding(top = 12.dp), placeholder = { Text("Search group or onion URL") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp))
         Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("${filtered.size} sources", fontWeight = FontWeight.SemiBold)
+            Text("${filtered.size} groups", fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            Text("Repository data only", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("${filtered.sumOf { it.urls.size }} URLs", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (filtered.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (sources.isEmpty()) "Source index unavailable in this build." else "No matching sources") }
         } else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
-            items(filtered, key = { it.url }) { SourceCard(it) { onSelect(it) } }
+            items(filtered, key = { it.name }) { SourceCard(it) { onSelect(it) } }
         }
     }
 }
 
 @Composable
-private fun SourceCard(entry: OnionEntry, onClick: () -> Unit) {
+private fun SourceCard(group: OnionGroup, onClick: () -> Unit) {
     Card(Modifier.fillMaxWidth().clickable(onClick = onClick), shape = RoundedCornerShape(17.dp)) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFF8B69E8).copy(alpha = .15f)) { Icon(Icons.Default.Language, null, Modifier.padding(9.dp), tint = Color(0xFF9B80FF)) }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(entry.entity, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(entry.host, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(entry.source, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(group.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${group.urls.size} onion URL${if (group.urls.size == 1) "" else "s"}", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Text(group.urls.take(2).joinToString("  •  ") { Uri.parse(it).host ?: it }, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -351,31 +358,33 @@ private fun SourceCard(entry: OnionEntry, onClick: () -> Unit) {
 }
 
 @Composable
-private fun Detail(entry: OnionEntry, health: HealthResult?, onBack: () -> Unit, onCopy: (String) -> Unit, onOpen: (String) -> Unit) {
-    Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack: () -> Unit, onCopy: (String) -> Unit, onOpen: (String) -> Unit) {
+    Column(Modifier.fillMaxSize().padding(18.dp)) {
         TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text("Back") }
-        Card(shape = RoundedCornerShape(24.dp)) {
-            Column(Modifier.padding(20.dp)) {
-                Icon(Icons.Default.Hub, null, tint = Color(0xFF8E79FF), modifier = Modifier.size(34.dp))
-                Spacer(Modifier.height(12.dp))
-                Text(entry.entity, fontSize = 21.sp, fontWeight = FontWeight.Bold)
-                Text(entry.url, color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
-                Spacer(Modifier.height(14.dp))
-                Text("Source file", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                Text(entry.source, fontSize = 13.sp)
-                Spacer(Modifier.height(10.dp))
-                StateLine("Availability", health?.status ?: "Not checked", when (health?.status) {
-                    "Online" -> Color(0xFF16B887)
-                    "Responding" -> Color(0xFFB88922)
-                    "Server error" -> Color(0xFFE58B35)
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                })
-                Text(health?.detail ?: "No live result for this source yet. Run live checks from Home; a local Tor SOCKS proxy is required.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("A failed check is only a point-in-time result and does not prove a site is permanently offline.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(group.name, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
+        Text("${group.urls.size} onion URLs", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 20.dp)) {
+            items(group.entries, key = { it.url }) { entry ->
+                val result = health[entry.url]
+                Card(shape = RoundedCornerShape(18.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(entry.url, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                        if (result != null) {
+                            StateLine("Availability", result.status, when (result.status) {
+                                "Online" -> Color(0xFF16B887)
+                                "Responding" -> Color(0xFFB88922)
+                                "Server error" -> Color(0xFFE58B35)
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            })
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { onCopy(entry.url) }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy") }
+                            Button(onClick = { onOpen(entry.url) }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.OpenInNew, null); Spacer(Modifier.width(6.dp)); Text("Open") }
+                        }
+                    }
+                }
             }
         }
-        Button(onClick = { onCopy(entry.url) }, Modifier.fillMaxWidth()) { Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(8.dp)); Text("Copy URL") }
-        OutlinedButton(onClick = { onOpen(entry.url) }, Modifier.fillMaxWidth()) { Icon(Icons.Default.OpenInNew, null); Spacer(Modifier.width(8.dp)); Text("Open with compatible app") }
     }
 }
 
@@ -383,12 +392,12 @@ private fun Detail(entry: OnionEntry, health: HealthResult?, onBack: () -> Unit,
 private fun Activity(count: Int, checking: Boolean, report: HealthReport?, onRunChecks: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("Activity", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        Text("Real events only. No fabricated scan results.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+        Text("Health check results", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
         Card(shape = RoundedCornerShape(18.dp)) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Inventory2, null, tint = Color(0xFF16B8A6), modifier = Modifier.size(28.dp))
                 Spacer(Modifier.width(12.dp))
-                Column { Text("Repository import", fontWeight = FontWeight.SemiBold); Text("$count unique onion URLs indexed in this build", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column { Text("Repository import", fontWeight = FontWeight.SemiBold); Text("$count onion URLs", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
         Card(shape = RoundedCornerShape(18.dp)) {
@@ -397,7 +406,7 @@ private fun Activity(count: Int, checking: Boolean, report: HealthReport?, onRun
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Live monitoring", fontWeight = FontWeight.SemiBold)
-                    Text(if (checking) "Health checks are running…" else report?.message ?: "No live checks have run yet. Start a local Tor SOCKS proxy to enable checks.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (checking) "Health checks are running…" else report?.message?.takeIf { report.torAvailable } ?: "No live checks yet.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(10.dp))
                     Button(onClick = onRunChecks, enabled = !checking && count > 0) {
                         if (checking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.PlayArrow, null)
@@ -430,14 +439,11 @@ private fun Settings(report: HealthReport?) {
         Text("Settings", fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Card(shape = RoundedCornerShape(18.dp)) {
             Column(Modifier.padding(16.dp)) {
-                Text("Local-first source index", fontWeight = FontWeight.SemiBold)
-                Text("The source index is bundled with this app. No cloud account is used.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                HorizontalDivider(Modifier.padding(vertical = 12.dp))
                 Text("Theme", fontWeight = FontWeight.SemiBold)
                 Text("Follows Android system light/dark appearance.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 HorizontalDivider(Modifier.padding(vertical = 12.dp))
-                Text("RaaSHub 1.0.0 • Native Kotlin", fontWeight = FontWeight.SemiBold)
-                Text(report?.message ?: "Live health checks require a reachable local Tor SOCKS proxy on port 9050 or 9150.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("RaaSHub 1.0.0", fontWeight = FontWeight.SemiBold)
+                Text(if (report?.torAvailable == false) "Network route unavailable" else "Health checks are available from Home and Activity.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

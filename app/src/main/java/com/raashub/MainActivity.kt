@@ -102,7 +102,7 @@ private fun parseVictims(raw: String): List<VictimEntry> = runCatching {
             if (name.isBlank() || group.isBlank()) continue
             add(VictimEntry(group, name, jsonText(item, "country", "victim_country", "location"),
                 jsonText(item, "country_code", "countryCode", "iso2", "iso_code").lowercase(),
-                jsonText(item, "leak_date", "leakDate", "published_date", "publication_date", "date_discovered", "discovered", "date"),
+                jsonText(item, "leak_date", "leakDate", "date_leaked", "date_posted", "posted_at", "published_at", "published_date", "publication_date"),
                 jsonText(item, "sector", "industry", "victim_sector", "organization_type"),
                 jsonText(item, "website", "domain", "url", "company_website")))
         }
@@ -712,7 +712,7 @@ private fun Sources(sources: List<OnionEntry>, victims: List<VictimEntry>, query
     val groups = remember(sources) { groupSources(sources) }
     val categories = remember(sources) { sources.map { it.category.lowercase() }.distinct().sorted() }
     val filtered = remember(groups, query, sourceFilter) { groups.filter { group ->
-        val isForum = group.name.contains("forum", true) || group.categories.any { it.contains("forum", true) } || group.urls.any { Uri.parse(it).host.orEmpty().contains("forum", true) }
+        val isForum = group.name.contains("forum", true) || group.categories.any { it.contains("forum", true) } || group.urls.any { it.contains("forum", true) || Uri.parse(it).host.orEmpty().contains("forum", true) }
         val matchesFilter = when (sourceFilter) {
             "all" -> true
             "forums" -> isForum
@@ -744,7 +744,7 @@ private fun Sources(sources: List<OnionEntry>, victims: List<VictimEntry>, query
         if (filtered.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (sources.isEmpty()) "No sources available." else "No matching sources") }
         } else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
-            items(filtered, key = { it.name }) { group -> SourceCard(group, victims.filter { it.group.equals(group.name, true) }) { onSelect(group) } }
+            items(filtered, key = { it.name }) { group -> SourceCard(group, victims.filter { it.group.equals(group.name, true) || it.group.replace(Regex("[^A-Za-z0-9]"), "").equals(group.name.replace(Regex("[^A-Za-z0-9]"), ""), true) }) { onSelect(group) } }
         }
     }
 }

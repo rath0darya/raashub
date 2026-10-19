@@ -28,9 +28,144 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.json.JSONArray
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.io.BufferedReader
+import java.io.IOException
+import java.io.InputStreamReader
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.nio.charset.StandardCharsets
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 private data class OnionEntry(val url: String, val entity: String, val source: String) {
     val host: String get() = runCatching { Uri.parse(url).host ?: url }.getOrDefault(url)
+}
+
+private data class HealthResult(val status: String, val detail: String, val checkedAt: Long)
+private data class HealthReport(val torAvailable: Boolean, val proxyPort: Int?, val message: String, val results: Map<String, HealthResult>)
+
+private suspend fun checkOnionSources(sources: List<OnionEntry>): HealthReport {
+    val proxyPort = findTorSocksProxy()
+    if (proxyPort == null) return HealthReport(
+        false, null,
+        "Tor SOCKS proxy not found on 127.0.0.1:9050 or :9150. Start a Tor service such as Orbot with a local SOCKS proxy, then run checks again.",
+        emptyMap()
+    )
+    if (sources.isEmpty()) return HealthReport(true, proxyPort, "Tor SOCKS proxy detected, but there are no indexed onion sources to check.", emptyMap())
+
+    val semaphore = Semaphore(4)
+    val results = kotlinx.coroutines.coroutineScope {
+        sources.take(10).map { entry ->
+            async(Dispatchers.IO) { semaphore.withPermit { entry.url to checkOneOnion(entry.url, proxyPort) } }
+        }.awaitAll().toMap()
+    }
+    val responding = results.values.count { it.status == "Online" || it.status == "Responding" }
+    return HealthReport(
+        true, proxyPort,
+        "Checked ${results.size} of ${sources.size} indexed sources through local Tor SOCKS port $proxyPort. $responding responded; a failed request is not proof a site is permanently offline.",
+        results
+    )
+}
+
+private fun findTorSocksProxy(): Int? {
+    for (port in listOf(9050, 9150)) {
+        try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress("127.0.0.1", port), 700)
+                socket.soTimeout = 700
+                socket.getOutputStream().write(byteArrayOf(5, 1, 0))
+                socket.getOutputStream().flush()
+                val response = ByteArray(2)
+                readFully(socket, response)
+                if (response[0].toInt() == 5 && response[1].toInt() == 0) return port
+            }
+        } catch (_: Exception) { /* Not a usable local SOCKS5 proxy. */ }
+    }
+    return null
+}
+
+private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
+    val checkedAt = System.currentTimeMillis()
+    return try {
+        val uri = Uri.parse(urlText)
+        val host = uri.host ?: throw IOException("Invalid source URL")
+        if (!host.endsWith(".onion", ignoreCase = true)) throw IOException("Health checks are restricted to onion hosts")
+        val scheme = (uri.scheme ?: "http").lowercase()
+        if (scheme != "http" && scheme != "https") throw IOException("Unsupported URL scheme")
+        val port = if (uri.port > 0) uri.port else if (scheme == "https") 443 else 80
+        val raw = Socket()
+        raw.connect(InetSocketAddress("127.0.0.1", proxyPort), 1800)
+        raw.soTimeout = 6500
+        try {
+            val out = raw.getOutputStream()
+            out.write(byteArrayOf(5, 1, 0)); out.flush()
+            val greeting = ByteArray(2); readFully(raw, greeting)
+            if (greeting[0].toInt() != 5 || greeting[1].toInt() != 0) throw IOException("SOCKS5 negotiation failed")
+            val hostBytes = host.toByteArray(StandardCharsets.US_ASCII)
+            if (hostBytes.size > 255) throw IOException("Invalid onion hostname")
+            out.write(byteArrayOf(5, 1, 0, 3, hostBytes.size.toByte()))
+            out.write(hostBytes)
+            out.write(byteArrayOf((port shr 8).toByte(), port.toByte())); out.flush()
+            val reply = ByteArray(4); readFully(raw, reply)
+            if (reply[0].toInt() != 5 || reply[1].toInt() != 0) throw IOException("Tor SOCKS reply ${reply[1].toInt() and 0xff}")
+            when (reply[3].toInt() and 0xff) {
+                1 -> skipFully(raw, 4)
+                3 -> { val length = raw.getInputStream().read(); if (length < 0) throw IOException("Incomplete SOCKS reply"); skipFully(raw, length) }
+                4 -> skipFully(raw, 16)
+                else -> throw IOException("Invalid SOCKS address type")
+            }
+            skipFully(raw, 2)
+            val active: Socket = if (scheme == "https") {
+                val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory).createSocket(raw, host, port, true) as SSLSocket
+                ssl.sslParameters = ssl.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+                ssl.startHandshake()
+                ssl
+            } else raw
+            active.use { connection ->
+                connection.soTimeout = 6500
+                val path = (uri.encodedPath?.takeIf { it.isNotEmpty() } ?: "/") + (uri.encodedQuery?.let { "?$it" } ?: "")
+                val request = "HEAD $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: RaaSHub-HealthCheck/1.0\r\nConnection: close\r\n\r\n"
+                connection.getOutputStream().write(request.toByteArray(StandardCharsets.ISO_8859_1))
+                connection.getOutputStream().flush()
+                val statusLine = BufferedReader(InputStreamReader(connection.getInputStream(), StandardCharsets.ISO_8859_1)).readLine()
+                    ?: throw IOException("Empty HTTP response")
+                val code = Regex("^HTTP/\\d(?:\\.\\d)?\\s+(\\d{3})").find(statusLine)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: throw IOException("Unrecognised HTTP response")
+                when {
+                    code in 200..399 -> HealthResult("Online", "HTTP $code • responded through Tor", checkedAt)
+                    code in 400..499 -> HealthResult("Responding", "HTTP $code • host responded through Tor", checkedAt)
+                    else -> HealthResult("Server error", "HTTP $code • host responded but returned an error", checkedAt)
+                }
+            }
+        } finally { runCatching { raw.close() } }
+    } catch (e: Exception) {
+        val message = if (e is java.net.SocketTimeoutException) "Timed out through Tor" else (e.message ?: "Connection failed").take(120)
+        HealthResult("Unverified", message, checkedAt)
+    }
+}
+
+private fun readFully(socket: Socket, buffer: ByteArray) {
+    var offset = 0
+    while (offset < buffer.size) {
+        val count = socket.getInputStream().read(buffer, offset, buffer.size - offset)
+        if (count < 0) throw IOException("Unexpected end of SOCKS response")
+        offset += count
+    }
+}
+
+private fun skipFully(socket: Socket, amount: Int) {
+    var remaining = amount
+    while (remaining > 0) {
+        val skipped = socket.getInputStream().skip(remaining.toLong()).toInt()
+        if (skipped > 0) remaining -= skipped
+        else { if (socket.getInputStream().read() < 0) throw IOException("Unexpected end of SOCKS response"); remaining-- }
+    }
 }
 
 class MainActivity : ComponentActivity() {
@@ -64,6 +199,18 @@ private fun HubApp(sources: List<OnionEntry>) {
     var tab by remember { mutableStateOf(Tab.HOME) }
     var search by remember { mutableStateOf("") }
     var selected by remember { mutableStateOf<OnionEntry?>(null) }
+    var checking by remember { mutableStateOf(false) }
+    var healthReport by remember { mutableStateOf<HealthReport?>(null) }
+    val scope = rememberCoroutineScope()
+    val runHealthChecks: () -> Unit = {
+        if (!checking) {
+            checking = true
+            scope.launch {
+                healthReport = checkOnionSources(sources)
+                checking = false
+            }
+        }
+    }
     MaterialTheme(colorScheme = scheme) {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
@@ -92,14 +239,14 @@ private fun HubApp(sources: List<OnionEntry>) {
                     Text("Repository-sourced intelligence. Stored on this device.", color = Color(0xFFCAD7EF), fontSize = 12.sp)
                 }
                 when {
-                    selected != null -> Detail(selected!!, onBack = { selected = null }, onCopy = { url ->
+                    selected != null -> Detail(selected!!, healthReport?.results?.get(selected!!.url), onBack = { selected = null }, onCopy = { url ->
                         val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                         cm.setPrimaryClip(android.content.ClipData.newPlainText("RaaSHub onion source", url))
                     }, onOpen = { url -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } })
-                    tab == Tab.HOME -> Home(sources) { tab = Tab.SOURCES }
+                    tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
                     tab == Tab.SOURCES -> Sources(sources, search, { search = it }) { selected = it }
-                    tab == Tab.ACTIVITY -> Activity(sources.size)
-                    else -> Settings()
+                    tab == Tab.ACTIVITY -> Activity(sources.size, checking, healthReport, runHealthChecks)
+                    else -> Settings(healthReport)
                 }
                 Text("Developed With ♥️ AnonVox", Modifier.fillMaxWidth().padding(vertical = 8.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -108,7 +255,7 @@ private fun HubApp(sources: List<OnionEntry>) {
 }
 
 @Composable
-private fun Home(sources: List<OnionEntry>, onExplore: () -> Unit) {
+private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthReport?, onRunChecks: () -> Unit, onExplore: () -> Unit) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -122,9 +269,15 @@ private fun Home(sources: List<OnionEntry>, onExplore: () -> Unit) {
                     Text("Intelligence snapshot", fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
                     StateLine("Repository ingestion", "Loaded", Color(0xFF16B887))
-                    StateLine("Live onion availability", "Not checked", MaterialTheme.colorScheme.onSurfaceVariant)
-                    StateLine("Network route", "Tor not confirmed", MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("No service is labelled active or offline without a real check through Tor.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    StateLine("Live onion availability", report?.let { "${it.results.size} checked" } ?: "Not checked", MaterialTheme.colorScheme.onSurfaceVariant)
+                    StateLine("Network route", when { checking -> "Checking…"; report?.torAvailable == true -> "Tor proxy detected"; report != null -> "Tor unavailable"; else -> "Not checked" }, MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (checking) "Checking the local Tor proxy and up to 10 onion sources…" else report?.message ?: "Live checks have not run yet. Checks require a local Tor SOCKS proxy.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(10.dp))
+                    Button(onClick = onRunChecks, enabled = !checking && sources.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
+                        if (checking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.NetworkCheck, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (checking) "Checking sources…" else "Run live checks (up to 10)")
+                    }
                 }
             }
         }
@@ -198,7 +351,7 @@ private fun SourceCard(entry: OnionEntry, onClick: () -> Unit) {
 }
 
 @Composable
-private fun Detail(entry: OnionEntry, onBack: () -> Unit, onCopy: (String) -> Unit, onOpen: (String) -> Unit) {
+private fun Detail(entry: OnionEntry, health: HealthResult?, onBack: () -> Unit, onCopy: (String) -> Unit, onOpen: (String) -> Unit) {
     Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text("Back") }
         Card(shape = RoundedCornerShape(24.dp)) {
@@ -211,8 +364,14 @@ private fun Detail(entry: OnionEntry, onBack: () -> Unit, onCopy: (String) -> Un
                 Text("Source file", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                 Text(entry.source, fontSize = 13.sp)
                 Spacer(Modifier.height(10.dp))
-                StateLine("Availability", "Unknown", MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("Opening an onion address requires a Tor-capable browser or a configured Tor route. This app does not claim traffic is routed through Tor.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                StateLine("Availability", health?.status ?: "Not checked", when (health?.status) {
+                    "Online" -> Color(0xFF16B887)
+                    "Responding" -> Color(0xFFB88922)
+                    "Server error" -> Color(0xFFE58B35)
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                })
+                Text(health?.detail ?: "No live result for this source yet. Run live checks from Home; a local Tor SOCKS proxy is required.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("A failed check is only a point-in-time result and does not prove a site is permanently offline.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         Button(onClick = { onCopy(entry.url) }, Modifier.fillMaxWidth()) { Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(8.dp)); Text("Copy URL") }
@@ -221,7 +380,7 @@ private fun Detail(entry: OnionEntry, onBack: () -> Unit, onCopy: (String) -> Un
 }
 
 @Composable
-private fun Activity(count: Int) {
+private fun Activity(count: Int, checking: Boolean, report: HealthReport?, onRunChecks: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("Activity", fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Text("Real events only. No fabricated scan results.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
@@ -236,14 +395,37 @@ private fun Activity(count: Int) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.PendingActions, null, tint = Color(0xFFB58AFF), modifier = Modifier.size(28.dp))
                 Spacer(Modifier.width(12.dp))
-                Column { Text("Live monitoring", fontWeight = FontWeight.SemiBold); Text("Not configured; no live health checks have run.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column(Modifier.weight(1f)) {
+                    Text("Live monitoring", fontWeight = FontWeight.SemiBold)
+                    Text(if (checking) "Health checks are running…" else report?.message ?: "No live checks have run yet. Start a local Tor SOCKS proxy to enable checks.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(10.dp))
+                    Button(onClick = onRunChecks, enabled = !checking && count > 0) {
+                        if (checking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.PlayArrow, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (checking) "Checking…" else "Run health checks")
+                    }
+                }
+            }
+        }
+        report?.results?.entries?.sortedBy { it.key }?.forEach { (url, result) ->
+            Card(shape = RoundedCornerShape(14.dp)) {
+                Column(Modifier.padding(12.dp)) {
+                    Text(Uri.parse(url).host ?: url, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    StateLine("Result", result.status, when (result.status) {
+                        "Online" -> Color(0xFF16B887)
+                        "Responding" -> Color(0xFFB88922)
+                        "Server error" -> Color(0xFFE58B35)
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    })
+                    Text(result.detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun Settings() {
+private fun Settings(report: HealthReport?) {
     Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("Settings", fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Card(shape = RoundedCornerShape(18.dp)) {
@@ -255,7 +437,7 @@ private fun Settings() {
                 Text("Follows Android system light/dark appearance.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 HorizontalDivider(Modifier.padding(vertical = 12.dp))
                 Text("RaaSHub 1.0.0 • Native Kotlin", fontWeight = FontWeight.SemiBold)
-                Text("Source availability remains Unknown until measured through a real Tor route.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(report?.message ?: "Live health checks require a reachable local Tor SOCKS proxy on port 9050 or 9150.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

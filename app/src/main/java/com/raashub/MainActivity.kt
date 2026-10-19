@@ -186,6 +186,7 @@ private fun skipFully(socket: Socket, amount: Int) {
 }
 
 class MainActivity : ComponentActivity() {
+    private var pendingTorUrl: String? = null
     private var torBound = false
     private val torConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) { }
@@ -198,6 +199,50 @@ class MainActivity : ComponentActivity() {
             torBound = bindService(Intent(this, TorService::class.java), torConnection, BIND_AUTO_CREATE)
         }
         setContent { HubApp(readSources()) }
+    }
+
+    fun openOnionUrl(url: String) {
+        pendingTorUrl = url
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                setPackage("org.torproject.torbrowser")
+            })
+            pendingTorUrl = null
+        } catch (_: ActivityNotFoundException) {
+            val marketIntent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("market://details?id=org.torproject.torbrowser")
+            )
+            try {
+                startActivity(marketIntent)
+            } catch (_: Exception) {
+                runCatching {
+                    startActivity(Intent(
+                        Intent.ACTION_VIEW,
+                        Uri.parse("https://play.google.com/store/apps/details?id=org.torproject.torbrowser")
+                    ))
+                }
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val pending = pendingTorUrl ?: return
+        val installed = try {
+            packageManager.getPackageInfo("org.torproject.torbrowser", 0)
+            true
+        } catch (_: Exception) {
+            false
+        }
+        if (installed) {
+            pendingTorUrl = null
+            runCatching {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(pending)).apply {
+                    setPackage("org.torproject.torbrowser")
+                })
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -216,32 +261,6 @@ class MainActivity : ComponentActivity() {
             }
         }.distinctBy { it.url.lowercase() }.sortedBy { it.host.lowercase() }
     }.getOrDefault(emptyList())
-}
-
-private fun openInTorBrowser(context: android.content.Context, url: String) {
-    val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-        setPackage("org.torproject.torbrowser")
-    }
-    try {
-        context.startActivity(browserIntent)
-    } catch (_: ActivityNotFoundException) {
-        val marketIntent = Intent(
-            Intent.ACTION_VIEW,
-            Uri.parse("market://details?id=org.torproject.torbrowser")
-        )
-        try {
-            context.startActivity(marketIntent)
-        } catch (_: Exception) {
-            runCatching {
-                context.startActivity(
-                    Intent(
-                        Intent.ACTION_VIEW,
-                        Uri.parse("https://play.google.com/store/apps/details?id=org.torproject.torbrowser")
-                    )
-                )
-            }
-        }
-    }
 }
 
 private enum class Tab(val title: String) { HOME("Home"), SOURCES("Sources"), ACTIVITY("Activity"), SETTINGS("Settings") }
@@ -298,7 +317,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                     selected != null -> Detail(selected!!, healthReport?.results.orEmpty(), onBack = { selected = null }, onCopy = { url ->
                         val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                         cm.setPrimaryClip(android.content.ClipData.newPlainText("RaaSHub onion URL", url))
-                    }, onOpen = { url -> openInTorBrowser(context, url) })
+                    }, onOpen = { url -> if (context is MainActivity) context.openOnionUrl(url) else runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage("org.torproject.torbrowser")) } })
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
                     tab == Tab.SOURCES -> Sources(sources, search, { search = it }) { selected = it }
                     tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, runHealthChecks)

@@ -8,6 +8,10 @@ on:
       - "README.md"
   workflow_dispatch:
 
+concurrency:
+  group: raashub-android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 

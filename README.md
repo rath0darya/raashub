@@ -1,36 +1,54 @@
-# RaaSHub Android
+# RaaSHub for Android
 
-RaaSHub is a **native Android Kotlin + Jetpack Compose application**. This repository is maintained for the Android APK, native source code, and data bundled into the app. Website pages, website styling/scripts, Node.js server files, Termux workflows, and standalone scanner/maintenance tools have been removed.
+RaaSHub is a **native Android app built with Kotlin and Jetpack Compose**. This repository is focused on the Android app, its bundled directory data, and APK build workflow. It does not contain a website frontend or a Node.js app runtime.
 
-## App identity
+## App details
 
-- App name: **RaaSHub**
-- Android application ID: `com.raashub`
-- Native entry point: `app/src/main/java/com/raashub/MainActivity.kt`
-- Android build configuration: `app/build.gradle.kts`
-- Canonical directory dataset: `data/directory.json`
-- Source index generator: `scripts/build_android_source_index.py`
-- APK destination: `Download/RaaSHub.apk`
-- CI workflow: `.github/workflows/android-apk.yml`
+- **App name:** RaaSHub
+- **Android application ID:** `com.raashub`
+- **UI framework:** Kotlin + Jetpack Compose
+- **Main screen source:** `app/src/main/java/com/raashub/MainActivity.kt`
+- **Canonical directory dataset:** `data/directory.json`
+- **Build-time source index generator:** `scripts/build_android_source_index.py`
+- **APK destination:** `Download/RaaSHub.apk`
+- **APK workflow:** [Build RaaSHub Android APK](.github/workflows/android-apk.yml)
+- **Original logo:** `assets/images/raashub-logo.png`
 
-## Native implementation
+## Native app and current capabilities
 
-The Android interface is written in Kotlin with Jetpack Compose. The app does not embed the website in a WebView and does not run Node.js, JavaScript, Python, or Termux as an app runtime. Source data is stored as JSON, and the build-time index generator is a development/build utility, not an app runtime dependency.
+The app uses native Android Compose UI. It does not use a WebView for its interface and does not require Node.js, JavaScript, Python, or Termux at runtime. JSON files hold directory data; the Python script is only a build-time utility that prepares the bundled source index.
 
-The build script scans retained JSON, TXT, and CSV data for onion URLs, normalizes and deduplicates them, and preserves source-file provenance. The app bundles the resulting index locally and uses the original RaaSHub logo as its icon resource.
+The current interface provides an overview, searchable source directory, source details and provenance, copy/open actions, an activity snapshot, and system-adaptive light/dark appearance. The source index generator scans retained JSON, TXT, and CSV files, normalizes and deduplicates onion URLs, and keeps source-file provenance.
 
-The current native app includes an overview, searchable source directory, source details/provenance, copy/open actions, an activity snapshot, and system-adaptive light/dark appearance. Live availability remains unknown unless measured. **Integrated Tor transport and live health checking are not yet implemented**; opening onion links requires a compatible Tor-capable browser or another configured Tor route. The app does not claim that all device traffic uses Tor.
+**Security and availability limits:** an entry in the dataset does not prove a site is online, trustworthy, or safe. Live health checking and integrated Tor transport are not yet implemented. Opening an onion address requires a compatible Tor-capable browser or another configured Tor route; RaaSHub does not claim to route all device traffic through Tor. The app does not use an external backend or cloud database.
 
-## Build and APK output
+## Build the debug APK
 
-The **Build RaaSHub Android APK** GitHub Actions workflow builds a debug/testing APK, checks that the output is non-empty, copies it to `Download/RaaSHub.apk`, uploads an artifact named `RaaSHub-Android-APK`, and attempts to commit the APK to the repository.
+The GitHub Actions workflow installs the Android SDK, generates the source index, installs the original logo, builds the debug APK, checks that the APK is non-empty, copies it to `Download/RaaSHub.apk`, uploads the `RaaSHub-Android-APK` artifact, and attempts to commit the APK to the repository.
 
-A successful workflow run is required before an APK can be considered ready. Earlier workflow runs failed before build steps started, so those runs did not verify an APK. If GitHub Actions runner limits prevent jobs from starting, build the project with Android Studio/Gradle on another machine.
+To build locally with Android Studio or Gradle:
 
-## Signing and updates
+1. Install Android Studio and a compatible JDK 17.
+2. Open this repository as a Gradle project.
+3. Ensure Android SDK Platform 35 and Build Tools 35.0.0 are installed.
+4. Run `gradle assembleDebug` from the repository root.
+5. Find the generated APK at `app/build/outputs/apk/debug/app-debug.apk`.
 
-The current workflow targets a **debug/testing APK**, not a production release. Android updates must use the same application ID and signing certificate as the installed version. Keep `com.raashub` stable. For repeatable production updates, configure a persistent private release keystore and never commit the private signing key to this repository.
+The CI build previously exposed a JVM-target mismatch (Java defaulted to 1.8 while Kotlin targeted 17). The Gradle configuration now explicitly aligns Java and Kotlin targets to **17**. Check the latest [GitHub Actions run](https://github.com/rath0darya/raashub/actions) for the current result. An APK is only confirmed when the workflow completes successfully and verifies `Download/RaaSHub.apk`.
 
-## Data and safety
+## Package ID, signing and updates
 
-The retained `data/` directory contains source datasets used to populate the app. A dataset entry does not prove that a service is online, legitimate, or safe. The app is offline-first and does not use an external backend or cloud database; refreshing the bundled source index requires a new build.
+The package ID is `com.raashub`. This must remain stable for compatible updates. The workflow currently produces a **debug/testing APK**, not a production-signed release. Android will only accept an in-place update when the application ID and signing certificate match the installed app. For production releases, configure a persistent private release keystore; never commit the private signing key to this repository.
+
+## Repository layout
+
+- `app/` — native Android source and resources
+- `assets/` — original app logo
+- `data/` — retained source datasets
+- `scripts/build_android_source_index.py` — build-time source index generation
+- `.github/workflows/android-apk.yml` — APK build workflow
+- `.github/workflows/unpack-repository.yml` — guarded archive extraction workflow (only runs when the archive is present)
+
+## Footer
+
+Developed With ♥️ AnonVox

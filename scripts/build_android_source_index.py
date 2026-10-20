@@ -94,25 +94,6 @@ OUT.parent.mkdir(parents=True, exist_ok=True)
 OUT.write_text(json.dumps(sorted(records.values(), key=lambda r: r["url"].lower()),
                            ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
-# Bundle victim leak intelligence separately from the URL directory. Preserve only
-# structured JSON from the repository; never invent victim names or leak dates.
-VICTIMS = DATA / "victims.json"
-VICTIM_OUT = OUT.parent / "victims.json"
-try:
-    victim_text = VICTIMS.read_text(encoding="utf-8").strip() if VICTIMS.is_file() else "[]"
-    victim_data = json.loads(victim_text) if victim_text else []
-except (OSError, json.JSONDecodeError):
-    victim_data = []
-VICTIM_OUT.write_text(json.dumps(victim_data, ensure_ascii=False, separators=(",", ":")),
-                      encoding="utf-8")
-if isinstance(victim_data, list):
-    victim_count = len(victim_data)
-elif isinstance(victim_data, dict):
-    victim_count = len(victim_data.get("victims", victim_data.get("data", victim_data.get("records", []))))
-else:
-    victim_count = 0
-print(f"Bundled {victim_count} source-provided victim records")
-
 onion_count = sum(".onion" in urlsplit(record["url"]).hostname.lower() for record in records.values())
 clear_count = len(records) - onion_count
 print(f"Indexed {len(records)} unique URLs ({onion_count} onion, {clear_count} clear-web) across {len({s for r in records.values() for s in r['sources']})} source references")

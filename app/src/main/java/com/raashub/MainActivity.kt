@@ -217,7 +217,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val timedOut = results.values.count { it.status == "Unverified" && it.error.contains("Timed out", ignoreCase = true) }
     return HealthReport(
         true, proxyPort,
-        "Checked all ${results.size} onion URLs using one 10-second response timeout per HTTP/HTTPS probe. $responding responded; $timedOut timed out; ${results.size - responding - timedOut} had other errors. Timed-out URLs can be checked again manually.",
+        "Checked all ${results.size} onion URLs using one 30-second response timeout per HTTP/HTTPS probe. $responding responded; $timedOut timed out; ${results.size - responding - timedOut} had other errors. Timed-out URLs can be checked again manually.",
         results
     )
 }
@@ -276,9 +276,9 @@ private suspend fun checkOnionSchemes(urlText: String, proxyPort: Int): HealthRe
     val primaryUrl = uri.buildUpon().scheme(scheme).build().toString()
     val alternateUrl = uri.buildUpon().scheme(alternate).build().toString()
 
-    // One bounded attempt per protocol. A timeout means "unverified", not "offline".
+    // Give each protocol enough time for a slow Tor circuit, without multi-minute retry chains. A timeout means "unverified", not "offline".
     // Keep HTTP and HTTPS parallel so a broken scheme does not block the other.
-    fun probe(url: String): HealthResult = checkOneOnionAttempt(url, proxyPort, 10000)
+    fun probe(url: String): HealthResult = checkOneOnionAttempt(url, proxyPort, 30000)
 
     // Always test both protocols. Onion services may publish HTTP URLs while also
     // serving HTTPS, or publish HTTPS URLs while only accepting HTTP.
@@ -657,7 +657,7 @@ private fun HubApp(sources: List<OnionEntry>) {
             Column(Modifier.fillMaxSize().padding(inset)) {
                 Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.tertiaryContainer))).padding(20.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size((LocalConfiguration.current.screenWidthDp * 0.12f).coerceIn(40f, 54f).dp).clip(RoundedCornerShape(14.dp)).background(Color.Black), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                        androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size((LocalConfiguration.current.screenWidthDp * 0.12f).coerceIn(40f, 54f).dp).clip(RoundedCornerShape(14.dp)).background(Color.Black), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text("RaaSHub", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)

@@ -77,11 +77,31 @@ jobs:
           mono = Image.new("RGBA", (size, size), (255, 255, 255, 0))
           mono.alpha_composite(mono_art, ((size-artwork.width)//2, (size-artwork.height)//2))
           mono.save(res / "drawable-nodpi/raashub_icon_monochrome.png", optimize=True)
-          # Keep the full-colour in-app logo on a black background as before.
+          # Build a dedicated in-app logo asset from the visible artwork bounds.
+          # ContentScale.Fit cannot remove padding already baked into the source PNG.
+          # Preserve the launcher artwork separately; only the in-app asset is tightened.
+          original = Image.open(source).convert("RGBA")
+          alpha = original.getchannel("A")
+          if alpha.getextrema() != (255, 255):
+              visible = alpha.point(lambda p: 255 if p > 12 else 0)
+          else:
+              # The source has an opaque background. Find non-background artwork
+              # against the expected black canvas, ignoring near-black compression noise.
+              rgb = original.convert("RGB")
+              visible = rgb.convert("L").point(lambda p: 255 if p > 18 else 0)
+          bbox = visible.getbbox()
+          if bbox:
+              original = original.crop(bbox)
+          # Make a square, black-backed asset with only a small, intentional margin.
+          # This makes the logo fill the in-app square container without stretching it.
+          side = max(original.width, original.height)
+          padding = max(2, round(side * 0.04))
+          target_side = max(1, side - 2 * padding)
+          original.thumbnail((target_side, target_side), Image.Resampling.LANCZOS)
+          icon_canvas = Image.new("RGBA", (side, side), (0, 0, 0, 255))
+          icon_canvas.alpha_composite(original, ((side-original.width)//2, (side-original.height)//2))
           icon = res / "drawable-nodpi/raashub_logo.png"
-          background = Image.new("RGBA", artwork.size, (0, 0, 0, 255))
-          background.alpha_composite(Image.open(source).convert("RGBA"))
-          background.convert("RGB").save(icon, format="PNG", optimize=True)
+          icon_canvas.convert("RGB").save(icon, format="PNG", optimize=True)
           # Adaptive icon resource definitions and system-themed icon support.
           (res / "mipmap-anydpi-v26").mkdir(parents=True, exist_ok=True)
           adaptive = '''<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">

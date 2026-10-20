@@ -484,7 +484,7 @@ class MainActivity : ComponentActivity() {
     fun showMonitoringNotification(completed: Int, total: Int, finished: Boolean, message: String = "") {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         val title = if (finished) "Live monitoring completed" else "RaaSHub live monitoring"
-        val content = if (finished) message.ifBlank { "Checked $total onion URLs." } else "Checking URLs: $completed of $total (${if (total > 0) completed * 100 / total else 0}%)"
+        val content = if (finished) message.ifBlank { "Checked $total URLs." } else "Checking URLs: $completed of $total (${if (total > 0) completed * 100 / total else 0}%)"
         val logo = runCatching { BitmapFactory.decodeResource(resources, R.drawable.raashub_logo) }.getOrNull()
         val notification = NotificationCompat.Builder(this, notificationChannelId)
             .setSmallIcon(R.drawable.raashub_notification)
@@ -802,11 +802,11 @@ private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) 
 @Composable
 private fun responseStatusColor(result: HealthResult?): Color = when {
     result == null -> Color(0xFF8792A2)
-    result.responseCode in 100..199 -> Color(0xFF4DA6FF)
-    result.responseCode in 200..299 -> Color(0xFF19B77A)
-    result.responseCode in 300..399 -> Color(0xFF8B7CFF)
-    result.responseCode in 400..499 -> Color(0xFFFFB547)
-    result.responseCode in 500..599 -> Color(0xFFFF5D67)
+    result.responseCode?.let { it in 100..199 } == true -> Color(0xFF4DA6FF)
+    result.responseCode?.let { it in 200..299 } == true -> Color(0xFF19B77A)
+    result.responseCode?.let { it in 300..399 } == true -> Color(0xFF8B7CFF)
+    result.responseCode?.let { it in 400..499 } == true -> Color(0xFFFFB547)
+    result.responseCode?.let { it in 500..599 } == true -> Color(0xFFFF5D67)
     result.error.contains("Timed out", true) -> Color(0xFFFF8A4C)
     else -> Color(0xFF8792A2)
 }
@@ -857,18 +857,15 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
             items(group.entries, key = { it.url }) { entry ->
                 val result = health[entry.url]
                 val statusLabel = when (result?.status) {
-                    "Online" -> "Active"
-                    "Responding" -> "Active (HTTP response)"
-                    "Server error" -> "Server error"
-                    "Unverified" -> "Unverified"
+                    "Online" -> "2xx • Success"
+                    "Redirect" -> "3xx • Redirect"
+                    "Client error" -> "4xx • Client error"
+                    "Server error" -> "5xx • Server error"
+                    "Informational" -> "1xx • Informational"
+                    "Unverified" -> "Unverified / no response"
                     else -> "Not checked"
                 }
-                val statusColor = when (result?.status) {
-                    "Online" -> Color(0xFF16B887)
-                    "Responding" -> Color(0xFFB88922)
-                    "Server error" -> Color(0xFFE58B35)
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                }
+                val statusColor = responseStatusColor(result)
                 val host = Uri.parse(entry.url).host ?: entry.url
                 Card(shape = RoundedCornerShape(18.dp)) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

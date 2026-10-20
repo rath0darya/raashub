@@ -202,56 +202,32 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val allSources = sources.distinctBy { it.url.trim().lowercase() }
     if (allSources.isEmpty()) return HealthReport(false, null, "No URLs are available to check.", emptyMap())
 
+    // Classify first: clear-web and onion URLs must never share a connection path.
     val onionSources = allSources.filter { it.host.endsWith(".onion", ignoreCase = true) }
-    // Publish scan start immediately. Waiting for an entire Tor circuit here used to
-    // make the UI appear frozen for up to 90 seconds before any URL job began.
+    val clearWebSources = allSources.filterNot { it.host.endsWith(".onion", ignoreCase = true) }
+
     withContext(Dispatchers.Main) {
         onProgress(0, allSources.size)
         onWorkerUpdate(
-            listOf(WorkerProgress("Connection check", "Preparing", if (onionSources.isEmpty()) "Checking clear-web URLs directly" else "Checking that Tor can reach a test website")),
-            "Starting the scan. First, RaaSHub checks that the secure connection is actually working; URLs are not marked offline just because a request times out."
+            listOf(
+                WorkerProgress("Clear-web crawler", if (clearWebSources.isEmpty()) "No URLs" else "Starting direct checks", "Direct HTTP/HTTPS; no Tor"),
+                WorkerProgress("Onion crawler", if (onionSources.isEmpty()) "No URLs" else "Preparing Tor independently", "Tor SOCKS; onion URLs only")
+            ),
+            "Two independent crawlers started. Clear-web uses direct internet connections; .onion URLs use Tor only."
         )
     }
-    val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
-        // A listening SOCKS port is not proof that Tor has a working circuit.
-        // Starting 128 onion requests before circuit readiness can cause a wave of
-        // false timeouts. Wait for a small real connection test before launching work.
-        val listenerDeadline = System.currentTimeMillis() + 15000L
-        var port: Int? = null
-        while (port == null && System.currentTimeMillis() < listenerDeadline) {
-            port = findTorSocksProxy()
-            if (port == null) Thread.sleep(500)
-        }
-        if (port != null) {
-            val circuitDeadline = System.currentTimeMillis() + 45000L
-            var ready = false
-            while (!ready && System.currentTimeMillis() < circuitDeadline) {
-                ready = isTorCircuitReady(port)
-                if (!ready) Thread.sleep(1000)
-            }
-            if (ready) port else null
-        } else null
-    }
 
-    // 16 worker groups × 8 long-lived URL slots = 128 independently scheduled URL jobs.
-    // A shared queue means a slow URL occupies only its own slot; it does not block a batch.
-    // Each URL also probes HTTP and HTTPS concurrently, so use a bounded dispatcher that can
-    // run both blocking socket probes for all URL slots without Dispatchers.IO's default cap.
-    val workerCount = 16
-    val urlsPerWorker = 8
-    val maxConcurrentUrls = workerCount * urlsPerWorker
-    val maxConcurrentProbes = maxConcurrentUrls * 2
-    val networkDispatcher = Dispatchers.IO.limitedParallelism(maxConcurrentProbes)
-    val queue = Channel<OnionEntry>(Channel.UNLIMITED)
-    allSources.forEach { queue.trySend(it).getOrThrow() }
-    queue.close()
-
+    // Keep the total cap at 128 concurrent URL jobs and 256 HTTP/HTTPS probes.
+    // Each crawler has its own queue and 64 slots, so Tor startup cannot hold up clear-web checks.
+    val slotsPerCrawler = 64
+    val networkDispatcher = Dispatchers.IO.limitedParallelism(256)
     val completed = AtomicInteger(0)
     val activeUrls = AtomicInteger(0)
     val peakActiveUrls = AtomicInteger(0)
     val results = java.util.concurrent.ConcurrentHashMap<String, HealthResult>()
     val liveWorkers = java.util.concurrent.ConcurrentHashMap<String, WorkerProgress>()
     val liveLog = java.util.concurrent.CopyOnWriteArrayList<String>()
+
     suspend fun publishWorker(id: String, status: String, url: String = "", log: String) {
         liveWorkers[id] = WorkerProgress(id, status, url)
         liveLog.add("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}  $log")
@@ -259,38 +235,87 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         val snapshot = liveWorkers.values.sortedBy { it.id }
         withContext(Dispatchers.Main) { onWorkerUpdate(snapshot, liveLog.joinToString("\n")) }
     }
-    kotlinx.coroutines.coroutineScope {
-        val workerGroups = (0 until workerCount).map { groupIndex ->
-            launch {
-                val slots = (0 until urlsPerWorker).map { slotIndex ->
-                    launch {
-                        val workerId = "Worker ${groupIndex + 1} · Slot ${slotIndex + 1}"
-                        publishWorker(workerId, "Waiting", log = "$workerId ready; waiting for a URL")
-                        for (entry in queue) {
-                            val active = activeUrls.incrementAndGet()
-                            peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
-                            publishWorker(workerId, "Checking", entry.url, "$workerId checking ${entry.url}")
-                            try {
-                                val result = try {
-                                    checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
-                                } catch (e: Exception) {
-                                    val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
-                                    HealthResult("Unverified", reason, System.currentTimeMillis(), finalUrl = entry.url, error = reason)
-                                }
-                                results[entry.url] = result
-                                publishWorker(workerId, result.status, entry.url, "$workerId finished: ${result.status} — ${result.detail}")
-                            } finally {
-                                activeUrls.decrementAndGet()
-                                val done = completed.incrementAndGet()
-                                withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
+
+    suspend fun runCrawler(
+        crawlerName: String,
+        entries: List<OnionEntry>,
+        slotCount: Int,
+        proxyPort: Int?
+    ) {
+        if (entries.isEmpty()) {
+            publishWorker(crawlerName, "Idle", log = "$crawlerName has no URLs assigned")
+            return
+        }
+        val queue = Channel<OnionEntry>(Channel.UNLIMITED)
+        entries.forEach { queue.trySend(it).getOrThrow() }
+        queue.close()
+
+        coroutineScope {
+            val slots = (0 until slotCount).map { slotIndex ->
+                launch {
+                    val workerId = "$crawlerName · Slot ${slotIndex + 1}"
+                    publishWorker(workerId, "Waiting", log = "$workerId ready")
+                    for (entry in queue) {
+                        val active = activeUrls.incrementAndGet()
+                        peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
+                        publishWorker(workerId, "Checking", entry.url, "$workerId checking ${entry.url}")
+                        try {
+                            val result = try {
+                                checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
+                            } catch (e: Exception) {
+                                val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                                HealthResult("Unverified", reason, System.currentTimeMillis(), finalUrl = entry.url, error = reason)
                             }
+                            results[entry.url] = result
+                            publishWorker(workerId, result.status, entry.url, "$workerId finished: ${result.status} — ${result.detail}")
+                        } finally {
+                            activeUrls.decrementAndGet()
+                            val done = completed.incrementAndGet()
+                            withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
                         }
                     }
                 }
-                slots.joinAll()
             }
+            slots.joinAll()
         }
-        workerGroups.joinAll()
+    }
+
+    kotlinx.coroutines.coroutineScope {
+        // This job starts immediately and uses direct sockets for non-onion hosts.
+        val clearWebJob = launch {
+            runCrawler("Clear-web crawler", clearWebSources, slotsPerCrawler, null)
+        }
+
+        // Tor discovery/circuit readiness runs only for onion URLs and never gates clear-web.
+        val onionJob = launch {
+            val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
+                val listenerDeadline = System.currentTimeMillis() + 15000L
+                var port: Int? = null
+                while (port == null && System.currentTimeMillis() < listenerDeadline) {
+                    port = findTorSocksProxy()
+                    if (port == null) kotlinx.coroutines.delay(500)
+                }
+                if (port != null) {
+                    val circuitDeadline = System.currentTimeMillis() + 45000L
+                    var ready = false
+                    while (!ready && System.currentTimeMillis() < circuitDeadline) {
+                        ready = isTorCircuitReady(port)
+                        if (!ready) kotlinx.coroutines.delay(1000)
+                    }
+                    if (ready) port else null
+                } else null
+            }
+            publishWorker(
+                "Onion crawler",
+                if (proxyPort == null && onionSources.isNotEmpty()) "Tor unavailable" else "Tor ready",
+                if (proxyPort == null) "Onion URLs will be marked unverified; clear-web continues independently" else "SOCKS port $proxyPort"
+            , log = if (proxyPort == null && onionSources.isNotEmpty())
+                "Tor is unavailable; onion URLs cannot be checked. Clear-web crawler is not affected."
+            else "Tor readiness check complete; onion crawler starting.")
+            runCrawler("Onion crawler", onionSources, slotsPerCrawler, proxyPort)
+        }
+
+        joinAll(clearWebJob, onionJob)
     }
 
     val finalResults = results.toMap()
@@ -298,9 +323,8 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val timedOut = finalResults.values.count { it.error.contains("Timed out", ignoreCase = true) }
     val online = finalResults.values.count { it.status == "Online" }
     val unverified = finalResults.values.count { it.status == "Unverified" }
-    return HealthReport(proxyPort != null || onionSources.isEmpty(), proxyPort,
-        "Processed ${finalResults.size}/${allSources.size} URLs. Worker pool: 16 groups × 8 concurrent URL slots (limit 128); HTTP/HTTPS probes run independently (limit 256 probes). Peak active URL jobs observed: ${peakActiveUrls.get()}. $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. Onion URLs are unverified if Tor is unavailable; a timeout is not proof a site is down.",
-        finalResults)
+    val message = "Processed ${finalResults.size}/${allSources.size} URLs. Separate crawlers: ${clearWebSources.size} clear-web URLs direct; ${onionSources.size} onion URLs via Tor only. Worker pool: 64 direct + 64 Tor URL slots (maximum 128 total); HTTP/HTTPS probes independently capped at 256. Peak active URL jobs: ${peakActiveUrls.get()}. $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. Tor unavailable means only onion URLs are unverified; direct checks are independent."
+    return HealthReport(onionSources.isEmpty() || liveWorkers["Onion crawler"]?.status == "Tor ready", liveWorkers["Onion crawler"]?.url?.removePrefix("SOCKS port ")?.toIntOrNull(), message, finalResults)
 }
 private fun isTorCircuitReady(proxyPort: Int): Boolean {
     return try {

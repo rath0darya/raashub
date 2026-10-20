@@ -58,12 +58,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.json.JSONArray
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.CoroutineDispatcher
 import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
@@ -178,11 +180,14 @@ private fun httpDateToIst(value: String): String = runCatching {
     formatIst(date.time)
 }.getOrDefault(value)
 
+@OptIn(ExperimentalCoroutinesApi::class)
 private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (Int, Int) -> Unit): HealthReport {
     val allSources = sources.distinctBy { it.url.trim().lowercase() }
     if (allSources.isEmpty()) return HealthReport(false, null, "No URLs are available to check.", emptyMap())
+
     val onionSources = allSources.filter { it.host.endsWith(".onion", ignoreCase = true) }
     val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
+        // Tor readiness is checked before the URL workers start, but the wait is bounded.
         val deadline = System.currentTimeMillis() + 90000L
         while (System.currentTimeMillis() < deadline) {
             val port = findTorSocksProxy()
@@ -191,41 +196,65 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         }
         null
     }
-    // 16 concurrent workers, each allowed to run 8 URL jobs at once: up to 128 URLs
-    // in flight. Each URL independently probes HTTP and HTTPS in parallel (up to 256 sockets).
-    // This is intentionally bounded to avoid unbounded socket/thread creation on Android.
+
+    // 16 worker groups × 8 long-lived URL slots = 128 independently scheduled URL jobs.
+    // A shared queue means a slow URL occupies only its own slot; it does not block a batch.
+    // Each URL also probes HTTP and HTTPS concurrently, so use a bounded dispatcher that can
+    // run both blocking socket probes for all URL slots without Dispatchers.IO's default cap.
     val workerCount = 16
     val urlsPerWorker = 8
     val maxConcurrentUrls = workerCount * urlsPerWorker
-    val semaphore = Semaphore(maxConcurrentUrls)
+    val maxConcurrentProbes = maxConcurrentUrls * 2
+    val networkDispatcher = Dispatchers.IO.limitedParallelism(maxConcurrentProbes)
+    val queue = Channel<OnionEntry>(Channel.UNLIMITED)
+    allSources.forEach { queue.trySend(it).getOrThrow() }
+    queue.close()
+
     val completed = AtomicInteger(0)
+    val activeUrls = AtomicInteger(0)
+    val peakActiveUrls = AtomicInteger(0)
+    val results = java.util.concurrent.ConcurrentHashMap<String, HealthResult>()
     withContext(Dispatchers.Main) { onProgress(0, allSources.size) }
-    val results = kotlinx.coroutines.coroutineScope {
-        allSources.map { entry ->
-            async(Dispatchers.IO) {
-                semaphore.withPermit {
-                    try {
-                        entry.url to checkUrlSchemes(entry.url, proxyPort)
-                    } catch (e: Exception) {
-                        val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
-                        entry.url to HealthResult("Unverified", reason, System.currentTimeMillis(), finalUrl = entry.url, error = reason)
-                    } finally {
-                        val done = completed.incrementAndGet()
-                        withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
+
+    kotlinx.coroutines.coroutineScope {
+        val workerGroups = (0 until workerCount).map {
+            launch {
+                val slots = (0 until urlsPerWorker).map {
+                    launch {
+                        for (entry in queue) {
+                            val active = activeUrls.incrementAndGet()
+                            peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
+                            try {
+                                val result = try {
+                                    checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
+                                } catch (e: Exception) {
+                                    val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                                    HealthResult("Unverified", reason, System.currentTimeMillis(), finalUrl = entry.url, error = reason)
+                                }
+                                results[entry.url] = result
+                            } finally {
+                                activeUrls.decrementAndGet()
+                                val done = completed.incrementAndGet()
+                                withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
+                            }
+                        }
                     }
                 }
+                slots.joinAll()
             }
-        }.awaitAll().toMap()
+        }
+        workerGroups.joinAll()
     }
-    val responses = results.values.count { it.responseCode != null }
-    val timedOut = results.values.count { it.error.contains("Timed out", ignoreCase = true) }
-    val online = results.values.count { it.status == "Online" }
-    val unverified = results.values.count { it.status == "Unverified" }
-    return HealthReport(proxyPort != null || onionSources.isEmpty(), proxyPort,
-        "Processed ${results.size}/${allSources.size} URLs (16 workers × 8 concurrent URL jobs; HTTP and HTTPS probed in parallel). $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. Onion URLs are unverified if Tor is unavailable; a timeout is not proof a site is down.",
-        results)
-}
 
+    val finalResults = results.toMap()
+    val responses = finalResults.values.count { it.responseCode != null }
+    val timedOut = finalResults.values.count { it.error.contains("Timed out", ignoreCase = true) }
+    val online = finalResults.values.count { it.status == "Online" }
+    val unverified = finalResults.values.count { it.status == "Unverified" }
+    return HealthReport(proxyPort != null || onionSources.isEmpty(), proxyPort,
+        "Processed ${finalResults.size}/${allSources.size} URLs. Worker pool: 16 groups × 8 concurrent URL slots (limit 128); HTTP/HTTPS probes run independently (limit 256 probes). Peak active URL jobs observed: ${peakActiveUrls.get()}. $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. Onion URLs are unverified if Tor is unavailable; a timeout is not proof a site is down.",
+        finalResults)
+}
 private fun isTorCircuitReady(proxyPort: Int): Boolean {
     return try {
         Socket().use { socket ->
@@ -273,7 +302,7 @@ private fun findTorSocksProxy(): Int? {
     return null
 }
 
-private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?): HealthResult {
+private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDispatcher: CoroutineDispatcher): HealthResult {
     val uri = Uri.parse(urlText)
     val scheme = (uri.scheme ?: "http").lowercase()
     val alternate = if (scheme == "https") "http" else "https"
@@ -287,8 +316,8 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?): HealthRes
     // Always test both protocols. Onion services may publish HTTP URLs while also
     // serving HTTPS, or publish HTTPS URLs while only accepting HTTP.
     val (primary, alternateResult) = kotlinx.coroutines.coroutineScope {
-        val first = async(Dispatchers.IO) { probe(primaryUrl) }
-        val second = async(Dispatchers.IO) { probe(alternateUrl) }
+        val first = async(networkDispatcher) { probe(primaryUrl) }
+        val second = async(networkDispatcher) { probe(alternateUrl) }
         first.await() to second.await()
     }
     val candidates = listOf(primary, alternateResult)

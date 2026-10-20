@@ -191,15 +191,24 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     // make the UI appear frozen for up to 90 seconds before any URL job began.
     withContext(Dispatchers.Main) { onProgress(0, allSources.size) }
     val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
-        // Only wait briefly for the local SOCKS listener. A circuit may take longer;
-        // Tor can establish it while the first requests are already in flight.
-        val deadline = System.currentTimeMillis() + 15000L
+        // A listening SOCKS port is not proof that Tor has a working circuit.
+        // Starting 128 onion requests before circuit readiness can cause a wave of
+        // false timeouts. Wait for a small real connection test before launching work.
+        val listenerDeadline = System.currentTimeMillis() + 15000L
         var port: Int? = null
-        while (port == null && System.currentTimeMillis() < deadline) {
+        while (port == null && System.currentTimeMillis() < listenerDeadline) {
             port = findTorSocksProxy()
             if (port == null) Thread.sleep(500)
         }
-        port
+        if (port != null) {
+            val circuitDeadline = System.currentTimeMillis() + 45000L
+            var ready = false
+            while (!ready && System.currentTimeMillis() < circuitDeadline) {
+                ready = isTorCircuitReady(port)
+                if (!ready) Thread.sleep(1000)
+            }
+            if (ready) port else null
+        } else null
     }
 
     // 16 worker groups × 8 long-lived URL slots = 128 independently scheduled URL jobs.
@@ -327,7 +336,7 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
 
     // Give each protocol enough time for a slow Tor circuit, without multi-minute retry chains. A timeout means "unverified", not "offline".
     // Keep HTTP and HTTPS parallel so a broken scheme does not block the other.
-    fun probe(url: String): HealthResult = checkOneOnionAttempt(url, proxyPort, 30000)
+    fun probe(url: String): HealthResult = checkOneOnionAttempt(url, proxyPort, 20000)
 
     // Always test both protocols. Onion services may publish HTTP URLs while also
     // serving HTTPS, or publish HTTPS URLs while only accepting HTTP.

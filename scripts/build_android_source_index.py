@@ -18,9 +18,17 @@ def normalize_url(raw):
     raw = str(raw or "").strip().rstrip(".,;)")
     if not raw:
         return None
+    # Repair malformed nested protocol prefixes before parsing the hostname.
+    for _ in range(4):
+        nested = re.match(r"(?i)^https?://[^/]+/(https?://.+)$", raw)
+        if not nested:
+            break
+        raw = nested.group(1)
     if not raw.lower().startswith(("http://", "https://")):
         raw = "http://" + raw
     parsed = urlsplit(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
     if not parsed.hostname:
         return None
     return raw

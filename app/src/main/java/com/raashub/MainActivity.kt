@@ -220,20 +220,19 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     // Finding a local SOCKS port only proves the app can reach Tor locally. It does not
     // prove Tor has a working circuit. Wait briefly for a real HTTP response before
     // launching hundreds of requests into a circuit that may still be starting.
-    if (proxyPort != null && onionSources.isNotEmpty()) {
-        withContext(Dispatchers.IO) {
-            val deadline = System.currentTimeMillis() + 45000L
-            var ready = false
-            while (!ready && System.currentTimeMillis() < deadline) {
-                ready = isTorCircuitReady(proxyPort)
-                if (!ready) {
-                    withContext(Dispatchers.Main) {
-                        onProgress(0, allSources.size, "Waiting for the secure connection to become ready…")
-                    }
-                    Thread.sleep(1500)
+    val torCircuitReady = if (onionSources.isEmpty()) true else if (proxyPort == null) false else withContext(Dispatchers.IO) {
+        val deadline = System.currentTimeMillis() + 45000L
+        var ready = false
+        while (!ready && System.currentTimeMillis() < deadline) {
+            ready = isTorCircuitReady(proxyPort)
+            if (!ready) {
+                withContext(Dispatchers.Main) {
+                    onProgress(0, allSources.size, "Waiting for the secure connection to become ready…")
                 }
+                Thread.sleep(1500)
             }
         }
+        ready
     }
 
     // 16 worker groups × 8 long-lived URL slots = 128 independently scheduled URL jobs.
@@ -297,7 +296,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val timedOut = finalResults.values.count { it.error.contains("Timed out", ignoreCase = true) }
     val online = finalResults.values.count { it.status == "Online" }
     val unverified = finalResults.values.count { it.status == "Unverified" }
-    return HealthReport(proxyPort != null || onionSources.isEmpty(), proxyPort,
+    return HealthReport(torCircuitReady, proxyPort,
         "Processed ${finalResults.size}/${allSources.size} URLs. Worker pool: 16 groups × 8 concurrent URL slots (limit 128); HTTP/HTTPS probes run independently (limit 256 probes). Peak active URL jobs observed: ${peakActiveUrls.get()}. $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. Onion URLs are unverified if Tor is unavailable; a timeout is not proof a site is down.",
         finalResults)
 }

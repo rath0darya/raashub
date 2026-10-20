@@ -409,10 +409,10 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
 
 private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs: Int): HealthResult {
     val checkedAt = System.currentTimeMillis()
+    val isOnion = Uri.parse(urlText).host?.endsWith(".onion", ignoreCase = true) == true
     return try {
         val uri = Uri.parse(urlText)
         val host = uri.host ?: throw IOException("Invalid source URL")
-        val isOnion = host.endsWith(".onion", ignoreCase = true)
         val scheme = (uri.scheme ?: "http").lowercase()
         if (scheme != "http" && scheme != "https") throw IOException("Unsupported URL scheme")
         if (isOnion && proxyPort == null) throw IOException("Tor proxy unavailable; onion URL not checked")
@@ -1059,7 +1059,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                 }
             }
         }
-        } }
+        }
         if (checking || workers.isNotEmpty()) {
             item {
                 Card(shape = RoundedCornerShape(16.dp)) {

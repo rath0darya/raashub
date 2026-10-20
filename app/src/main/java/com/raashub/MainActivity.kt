@@ -191,8 +191,13 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         }
         null
     }
-    // Sixteen worker slots process the complete URL queue. Every URL receives HTTP and HTTPS probes.
-    val semaphore = Semaphore(16)
+    // 16 concurrent workers, each allowed to run 8 URL jobs at once: up to 128 URLs
+    // in flight. Each URL independently probes HTTP and HTTPS in parallel (up to 256 sockets).
+    // This is intentionally bounded to avoid unbounded socket/thread creation on Android.
+    val workerCount = 16
+    val urlsPerWorker = 8
+    val maxConcurrentUrls = workerCount * urlsPerWorker
+    val semaphore = Semaphore(maxConcurrentUrls)
     val completed = AtomicInteger(0)
     withContext(Dispatchers.Main) { onProgress(0, allSources.size) }
     val results = kotlinx.coroutines.coroutineScope {
@@ -217,7 +222,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val online = results.values.count { it.status == "Online" }
     val unverified = results.values.count { it.status == "Unverified" }
     return HealthReport(proxyPort != null || onionSources.isEmpty(), proxyPort,
-        "Attempted ${results.size}/${allSources.size} URLs (16 worker slots; HTTP and HTTPS tested). $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. A timeout is not proof a site is down.",
+        "Processed ${results.size}/${allSources.size} URLs (16 workers × 8 concurrent URL jobs; HTTP and HTTPS probed in parallel). $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. Onion URLs are unverified if Tor is unavailable; a timeout is not proof a site is down.",
         results)
 }
 
@@ -667,7 +672,7 @@ private fun HubApp(sources: List<OnionEntry>) {
             Column(Modifier.fillMaxSize().padding(inset)) {
                 Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.tertiaryContainer))).padding(20.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size((LocalConfiguration.current.screenWidthDp * 0.12f).coerceIn(40f, 54f).dp).clip(RoundedCornerShape(14.dp)).background(Color.Black), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+                        androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size((LocalConfiguration.current.screenWidthDp * 0.12f).coerceIn(40f, 54f).dp).clip(RoundedCornerShape(14.dp)).background(Color.Black), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text("RaaSHub", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)

@@ -191,9 +191,6 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         }
         null
     }
-    if (onionSources.isNotEmpty() && proxyPort == null) {
-        return HealthReport(false, null, "Tor was not ready. No onion URLs were marked down or skipped; retry when Tor is connected.", emptyMap())
-    }
     // Sixteen worker slots process the complete URL queue. Every URL receives HTTP and HTTPS probes.
     val semaphore = Semaphore(16)
     val completed = AtomicInteger(0)
@@ -219,7 +216,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val timedOut = results.values.count { it.error.contains("Timed out", ignoreCase = true) }
     val online = results.values.count { it.status == "Online" }
     val unverified = results.values.count { it.status == "Unverified" }
-    return HealthReport(true, proxyPort,
+    return HealthReport(proxyPort != null || onionSources.isEmpty(), proxyPort,
         "Attempted ${results.size}/${allSources.size} URLs (16 worker slots; HTTP and HTTPS tested). $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. A timeout is not proof a site is down.",
         results)
 }
@@ -317,11 +314,11 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?): HealthRes
         finalUrl = selected.finalUrl.ifBlank { primaryUrl },
         headers = combinedHeaders,
         status = when {
-            reachable.any { it.responseCode in 200..299 } -> "Online"
-            reachable.any { it.responseCode in 300..399 } -> "Redirect"
-            reachable.any { it.responseCode in 400..499 } -> "Client error"
-            reachable.any { it.responseCode in 500..599 } -> "Server error"
-            reachable.any { it.responseCode in 100..199 } -> "Informational"
+            reachable.any { it.responseCode?.let { code -> code in 200..299 } == true } -> "Online"
+            reachable.any { it.responseCode?.let { code -> code in 300..399 } == true } -> "Redirect"
+            reachable.any { it.responseCode?.let { code -> code in 400..499 } == true } -> "Client error"
+            reachable.any { it.responseCode?.let { code -> code in 500..599 } == true } -> "Server error"
+            reachable.any { it.responseCode?.let { code -> code in 100..199 } == true } -> "Informational"
             reachable.any { it.responseCode != null } -> "HTTP response"
             else -> "Unverified"
         },

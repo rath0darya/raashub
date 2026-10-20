@@ -716,7 +716,7 @@ private fun HubApp(sources: List<OnionEntry>) {
             Column(Modifier.fillMaxSize().padding(inset)) {
                 Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.tertiaryContainer))).padding(20.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size((LocalConfiguration.current.screenWidthDp * 0.12f).coerceIn(40f, 54f).dp).clip(RoundedCornerShape(14.dp)).background(Color.Black), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                        androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size((LocalConfiguration.current.screenWidthDp * 0.12f).coerceIn(40f, 54f).dp).clip(RoundedCornerShape(14.dp)).background(Color.Black), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text("RaaSHub", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)

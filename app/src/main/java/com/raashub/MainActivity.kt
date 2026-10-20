@@ -193,8 +193,9 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     }
     if (proxyPort == null) return HealthReport(false, null, "Tor proxy or Tor circuit did not become ready within 90 seconds. Check your internet connection and retry.", emptyMap())
 
-    // Tor circuits are expensive to establish; high parallelism can overload the local proxy.
-    val semaphore = Semaphore(4)
+    // Keep Tor concurrency conservative, then retry timed-out services with progressively
+    // longer waits. Some onion services take minutes to establish a circuit or send headers.
+    val semaphore = Semaphore(3)
     val completed = AtomicInteger(0)
     withContext(Dispatchers.Main) { onProgress(0, onionSources.size) }
     val results = kotlinx.coroutines.coroutineScope {
@@ -202,14 +203,17 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
             async(Dispatchers.IO) {
                 semaphore.withPermit {
                     try {
-                        var result = checkOneOnionAttempt(entry.url, proxyPort, 12000)
+                        var result = checkOneOnionAttempt(entry.url, proxyPort, 45000)
                         if (result.status == "Unverified" && result.error.contains("Timed out", ignoreCase = true)) {
-                            // Give slow onion services one longer retry before marking them unverified.
-                            result = checkOneOnionAttempt(entry.url, proxyPort, 18000)
+                            result = checkOneOnionAttempt(entry.url, proxyPort, 90000)
+                        }
+                        if (result.status == "Unverified" && result.error.contains("Timed out", ignoreCase = true)) {
+                            // Final slow-service pass: allow up to three minutes for the Tor
+                            // connection, TLS handshake and HTTP response headers to complete.
+                            result = checkOneOnionAttempt(entry.url, proxyPort, 180000)
                         }
                         entry.url to result
-                    }
-                    finally {
+                    } finally {
                         val done = completed.incrementAndGet()
                         withContext(Dispatchers.Main) { onProgress(done, onionSources.size) }
                     }
@@ -218,9 +222,10 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         }.awaitAll().toMap()
     }
     val responding = results.values.count { it.status == "Online" || it.status == "Responding" }
+    val timedOut = results.values.count { it.status == "Unverified" && it.error.contains("Timed out", ignoreCase = true) }
     return HealthReport(
         true, proxyPort,
-        "Checked all ${results.size} onion URLs. $responding responded; ${results.size - responding} could not be confirmed.",
+        "Checked all ${results.size} onion URLs. $responding responded; $timedOut still timed out after retries; ${results.size - responding - timedOut} had other errors. Slow services received retries up to 3 minutes each.",
         results
     )
 }

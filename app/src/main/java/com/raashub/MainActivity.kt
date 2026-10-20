@@ -179,12 +179,11 @@ private fun httpDateToIst(value: String): String = runCatching {
 }.getOrDefault(value)
 
 private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (Int, Int) -> Unit): HealthReport {
-    val onionSources = sources.filter { it.host.endsWith(".onion", ignoreCase = true) }.distinctBy { it.url.lowercase() }
-    if (onionSources.isEmpty()) return HealthReport(false, null, "No onion URLs available to check.", emptyMap())
-
-    // Do not let Tor startup consume most of a short live scan.
-    val proxyPort = withContext(Dispatchers.IO) {
-        val deadline = System.currentTimeMillis() + 30000L
+    val allSources = sources.distinctBy { it.url.trim().lowercase() }
+    if (allSources.isEmpty()) return HealthReport(false, null, "No URLs are available to check.", emptyMap())
+    val onionSources = allSources.filter { it.host.endsWith(".onion", ignoreCase = true) }
+    val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
+        val deadline = System.currentTimeMillis() + 90000L
         while (System.currentTimeMillis() < deadline) {
             val port = findTorSocksProxy()
             if (port != null && isTorCircuitReady(port)) return@withContext port
@@ -192,34 +191,37 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         }
         null
     }
-    if (proxyPort == null) return HealthReport(false, null, "Tor proxy or Tor circuit did not become ready within 90 seconds. Check your internet connection and retry.", emptyMap())
-
-    // Fast scan: keep concurrency bounded and never retry a stalled onion site.
-    // Both HTTP and HTTPS are still tested concurrently for every URL.
-    val semaphore = Semaphore(6)
+    if (onionSources.isNotEmpty() && proxyPort == null) {
+        return HealthReport(false, null, "Tor was not ready. No onion URLs were marked down or skipped; retry when Tor is connected.", emptyMap())
+    }
+    // Sixteen worker slots process the complete URL queue. Every URL receives HTTP and HTTPS probes.
+    val semaphore = Semaphore(16)
     val completed = AtomicInteger(0)
-    withContext(Dispatchers.Main) { onProgress(0, onionSources.size) }
+    withContext(Dispatchers.Main) { onProgress(0, allSources.size) }
     val results = kotlinx.coroutines.coroutineScope {
-        onionSources.map { entry ->
+        allSources.map { entry ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
                     try {
-                        entry.url to checkOnionSchemes(entry.url, proxyPort)
+                        entry.url to checkUrlSchemes(entry.url, proxyPort)
+                    } catch (e: Exception) {
+                        val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                        entry.url to HealthResult("Unverified", reason, System.currentTimeMillis(), finalUrl = entry.url, error = reason)
                     } finally {
                         val done = completed.incrementAndGet()
-                        withContext(Dispatchers.Main) { onProgress(done, onionSources.size) }
+                        withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
                     }
                 }
             }
         }.awaitAll().toMap()
     }
-    val responding = results.values.count { it.status == "Online" || it.status == "Responding" }
-    val timedOut = results.values.count { it.status == "Unverified" && it.error.contains("Timed out", ignoreCase = true) }
-    return HealthReport(
-        true, proxyPort,
-        "Checked all ${results.size} onion URLs using one 30-second response timeout per HTTP/HTTPS probe. $responding responded; $timedOut timed out; ${results.size - responding - timedOut} had other errors. Timed-out URLs can be checked again manually.",
-        results
-    )
+    val responses = results.values.count { it.responseCode != null }
+    val timedOut = results.values.count { it.error.contains("Timed out", ignoreCase = true) }
+    val online = results.values.count { it.status == "Online" }
+    val unverified = results.values.count { it.status == "Unverified" }
+    return HealthReport(true, proxyPort,
+        "Attempted ${results.size}/${allSources.size} URLs (16 worker slots; HTTP and HTTPS tested). $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. A timeout is not proof a site is down.",
+        results)
 }
 
 private fun isTorCircuitReady(proxyPort: Int): Boolean {
@@ -269,7 +271,7 @@ private fun findTorSocksProxy(): Int? {
     return null
 }
 
-private suspend fun checkOnionSchemes(urlText: String, proxyPort: Int): HealthResult {
+private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?): HealthResult {
     val uri = Uri.parse(urlText)
     val scheme = (uri.scheme ?: "http").lowercase()
     val alternate = if (scheme == "https") "http" else "https"
@@ -315,46 +317,54 @@ private suspend fun checkOnionSchemes(urlText: String, proxyPort: Int): HealthRe
         finalUrl = selected.finalUrl.ifBlank { primaryUrl },
         headers = combinedHeaders,
         status = when {
-            reachable.any { it.responseCode in 200..399 } -> "Online"
-            reachable.any { it.responseCode in 400..499 } -> "Responding"
-            reachable.any { it.responseCode != null } -> "Server error"
+            reachable.any { it.responseCode in 200..299 } -> "Online"
+            reachable.any { it.responseCode in 300..399 } -> "Redirect"
+            reachable.any { it.responseCode in 400..499 } -> "Client error"
+            reachable.any { it.responseCode in 500..599 } -> "Server error"
+            reachable.any { it.responseCode in 100..199 } -> "Informational"
+            reachable.any { it.responseCode != null } -> "HTTP response"
             else -> "Unverified"
         },
         error = if (reachable.isEmpty()) listOf(primary.error, alternateResult.error).filter { it.isNotBlank() }.distinct().joinToString(" | ") else ""
     )
 }
 
-private fun checkOneOnionAttempt(urlText: String, proxyPort: Int, readTimeoutMs: Int): HealthResult {
+private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs: Int): HealthResult {
     val checkedAt = System.currentTimeMillis()
     return try {
         val uri = Uri.parse(urlText)
         val host = uri.host ?: throw IOException("Invalid source URL")
-        if (!host.endsWith(".onion", ignoreCase = true)) throw IOException("Health checks are restricted to onion hosts")
+        val isOnion = host.endsWith(".onion", ignoreCase = true)
         val scheme = (uri.scheme ?: "http").lowercase()
         if (scheme != "http" && scheme != "https") throw IOException("Unsupported URL scheme")
+        if (isOnion && proxyPort == null) throw IOException("Tor proxy unavailable; onion URL not checked")
         val port = if (uri.port > 0) uri.port else if (scheme == "https") 443 else 80
         val raw = Socket()
-        raw.connect(InetSocketAddress("127.0.0.1", proxyPort), 5000)
         raw.soTimeout = readTimeoutMs
         try {
-            val out = raw.getOutputStream()
-            out.write(byteArrayOf(5, 1, 0)); out.flush()
-            val greeting = ByteArray(2); readFully(raw, greeting)
-            if (greeting[0].toInt() != 5 || greeting[1].toInt() != 0) throw IOException("SOCKS5 negotiation failed")
-            val hostBytes = host.toByteArray(StandardCharsets.US_ASCII)
-            if (hostBytes.size > 255) throw IOException("Invalid onion hostname")
-            out.write(byteArrayOf(5, 1, 0, 3, hostBytes.size.toByte()))
-            out.write(hostBytes)
-            out.write(byteArrayOf((port shr 8).toByte(), port.toByte())); out.flush()
-            val reply = ByteArray(4); readFully(raw, reply)
-            if (reply[0].toInt() != 5 || reply[1].toInt() != 0) throw IOException("Tor SOCKS reply ${reply[1].toInt() and 0xff}")
-            when (reply[3].toInt() and 0xff) {
-                1 -> skipFully(raw, 4)
-                3 -> { val length = raw.getInputStream().read(); if (length < 0) throw IOException("Incomplete SOCKS reply"); skipFully(raw, length) }
-                4 -> skipFully(raw, 16)
-                else -> throw IOException("Invalid SOCKS address type")
+            if (isOnion) {
+                raw.connect(InetSocketAddress("127.0.0.1", proxyPort!!), 5000)
+                val out = raw.getOutputStream()
+                out.write(byteArrayOf(5, 1, 0)); out.flush()
+                val greeting = ByteArray(2); readFully(raw, greeting)
+                if (greeting[0].toInt() != 5 || greeting[1].toInt() != 0) throw IOException("SOCKS5 negotiation failed")
+                val hostBytes = host.toByteArray(StandardCharsets.US_ASCII)
+                if (hostBytes.size > 255) throw IOException("Invalid onion hostname")
+                out.write(byteArrayOf(5, 1, 0, 3, hostBytes.size.toByte()))
+                out.write(hostBytes)
+                out.write(byteArrayOf((port shr 8).toByte(), port.toByte())); out.flush()
+                val reply = ByteArray(4); readFully(raw, reply)
+                if (reply[0].toInt() != 5 || reply[1].toInt() != 0) throw IOException("Tor SOCKS reply ${reply[1].toInt() and 0xff}")
+                when (reply[3].toInt() and 0xff) {
+                    1 -> skipFully(raw, 4)
+                    3 -> { val length = raw.getInputStream().read(); if (length < 0) throw IOException("Incomplete SOCKS reply"); skipFully(raw, length) }
+                    4 -> skipFully(raw, 16)
+                    else -> throw IOException("Invalid SOCKS address type")
+                }
+                skipFully(raw, 2)
+            } else {
+                raw.connect(InetSocketAddress(host, port), 7000)
             }
-            skipFully(raw, 2)
             val active: Socket = if (scheme == "https") {
                 val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory).createSocket(raw, host, port, true) as SSLSocket
                 ssl.sslParameters = ssl.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
@@ -390,10 +400,13 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int, readTimeoutMs:
                 val contentType = headers["content-type"].orEmpty()
                 val server = headers["server"].orEmpty()
                 val detail = "HTTP $code • ${if (code in 200..399) "responded" else "server responded"}"
-                val status = when {
-                    code in 200..399 -> "Online"
-                    code in 400..499 -> "Responding"
-                    else -> "Server error"
+                val status = when (code) {
+                    in 100..199 -> "Informational"
+                    in 200..299 -> "Online"
+                    in 300..399 -> "Redirect"
+                    in 400..499 -> "Client error"
+                    in 500..599 -> "Server error"
+                    else -> "Unverified"
                 }
                 HealthResult(
                     status = status, detail = detail, checkedAt = checkedAt, responseCode = code,

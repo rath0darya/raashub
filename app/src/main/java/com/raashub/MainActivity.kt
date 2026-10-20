@@ -106,6 +106,7 @@ private data class HealthResult(
     val error: String = ""
 )
 private data class HealthReport(val torAvailable: Boolean, val proxyPort: Int?, val message: String, val results: Map<String, HealthResult>)
+private data class WorkerProgress(val id: String, val status: String, val url: String = "")
 
 private const val LATEST_LIVE_CHECK_PREFS = "raashub_latest_live_check_v2"
 private const val LATEST_LIVE_CHECK_KEY = "latest_report"
@@ -181,7 +182,7 @@ private fun httpDateToIst(value: String): String = runCatching {
 }.getOrDefault(value)
 
 @OptIn(ExperimentalCoroutinesApi::class)
-private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (Int, Int) -> Unit): HealthReport {
+private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (Int, Int) -> Unit, onWorkerUpdate: (List<WorkerProgress>, String) -> Unit): HealthReport {
     val allSources = sources.distinctBy { it.url.trim().lowercase() }
     if (allSources.isEmpty()) return HealthReport(false, null, "No URLs are available to check.", emptyMap())
 
@@ -218,14 +219,26 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val activeUrls = AtomicInteger(0)
     val peakActiveUrls = AtomicInteger(0)
     val results = java.util.concurrent.ConcurrentHashMap<String, HealthResult>()
+    val liveWorkers = java.util.concurrent.ConcurrentHashMap<String, WorkerProgress>()
+    val liveLog = java.util.concurrent.CopyOnWriteArrayList<String>()
+    suspend fun publishWorker(id: String, status: String, url: String = "", log: String) {
+        liveWorkers[id] = WorkerProgress(id, status, url)
+        liveLog.add("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}  $log")
+        while (liveLog.size > 80) liveLog.removeAt(0)
+        val snapshot = liveWorkers.values.sortedBy { it.id }
+        withContext(Dispatchers.Main) { onWorkerUpdate(snapshot, liveLog.joinToString("\\n")) }
+    }
     kotlinx.coroutines.coroutineScope {
-        val workerGroups = (0 until workerCount).map {
+        val workerGroups = (0 until workerCount).map { groupIndex ->
             launch {
-                val slots = (0 until urlsPerWorker).map {
+                val slots = (0 until urlsPerWorker).map { slotIndex ->
                     launch {
+                        val workerId = "Worker ${groupIndex + 1} · Slot ${slotIndex + 1}"
+                        publishWorker(workerId, "Waiting", log = "$workerId ready; waiting for a URL")
                         for (entry in queue) {
                             val active = activeUrls.incrementAndGet()
                             peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
+                            publishWorker(workerId, "Checking", entry.url, "$workerId checking ${entry.url}")
                             try {
                                 val result = try {
                                     checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
@@ -234,6 +247,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                                     HealthResult("Unverified", reason, System.currentTimeMillis(), finalUrl = entry.url, error = reason)
                                 }
                                 results[entry.url] = result
+                                publishWorker(workerId, result.status, entry.url, "$workerId finished: ${result.status} — ${result.detail}")
                             } finally {
                                 activeUrls.decrementAndGet()
                                 val done = completed.incrementAndGet()
@@ -452,9 +466,9 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
         } finally { runCatching { raw.close() } }
     } catch (e: Exception) {
         val reason = when (e) {
-            is java.net.SocketTimeoutException -> "Timed out through Tor"
-            is javax.net.ssl.SSLException -> "TLS/HTTPS handshake failed"
-            is java.net.ConnectException -> "Connection refused or unreachable through Tor"
+            is java.net.SocketTimeoutException -> if (isOnion) "Timed out through Tor; the site may still be online" else "Timed out waiting for the website response; the site may still be online"
+            is javax.net.ssl.SSLException -> "Secure HTTPS connection failed"
+            is java.net.ConnectException -> if (isOnion) "Could not connect through Tor; the site may still be online" else "Could not connect to the website; the site may still be online"
             else -> e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
         }
         HealthResult("Unverified", reason, checkedAt, finalUrl = urlText, error = reason)
@@ -629,6 +643,8 @@ private fun HubApp(sources: List<OnionEntry>) {
     var healthReport by remember { mutableStateOf(loadLatestHealthReport(context)) }
     var progressDone by remember { mutableIntStateOf(0) }
     var progressTotal by remember { mutableIntStateOf(0) }
+    var workerProgress by remember { mutableStateOf<List<WorkerProgress>>(emptyList()) }
+    var activityLog by remember { mutableStateOf("Waiting for a scan to start.") }
     var lastBackPressed by remember { mutableLongStateOf(0L) }
     val scope = rememberCoroutineScope()
     val runHealthChecks: () -> Unit = {
@@ -639,10 +655,13 @@ private fun HubApp(sources: List<OnionEntry>) {
             (context as? MainActivity)?.showMonitoringNotification(0, progressTotal, false)
             scope.launch {
                 try {
-                    val completedReport = checkOnionSources(sources) { done, total ->
+                    val completedReport = checkOnionSources(sources, { done, total ->
                         progressDone = done
                         progressTotal = total
                         (context as? MainActivity)?.showMonitoringNotification(done, total, false)
+                    }) { workers, log ->
+                        workerProgress = workers
+                        activityLog = log
                     }
                     healthReport = completedReport
                     saveLatestHealthReport(context, completedReport)
@@ -654,6 +673,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                     // Never leave the Run button permanently disabled after a failed scan.
                     val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
                     val failure = HealthReport(false, null, "Scan failed: $reason", emptyMap())
+                    activityLog = (activityLog + "\\nScan stopped: $reason").takeLast(12000)
                     healthReport = failure
                     saveLatestHealthReport(context, failure)
                     Toast.makeText(context, failure.message, Toast.LENGTH_LONG).show()
@@ -733,7 +753,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                     }, onOpen = { url -> if (context is MainActivity) context.openOnionUrl(url) else runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage("org.torproject.torbrowser")) } })
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
                     tab == Tab.SOURCES -> Sources(sources, search, { search = it }, sourceFilter, { sourceFilter = it }, healthReport?.results.orEmpty()) { selected = it }
-                    tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, progressDone, progressTotal, runHealthChecks)
+                    tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, progressDone, progressTotal, workerProgress, activityLog, runHealthChecks)
                     else -> Settings(healthReport, sources.size, darkMode, { enabled -> darkMode = enabled; themePrefs.edit().putBoolean("dark_mode", enabled).apply() }) { (context as? MainActivity)?.openNotificationSettings() } 
                 }
             }
@@ -967,19 +987,20 @@ private fun DetailLine(label: String, value: String) {
 }
 
 @Composable
-private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: HealthReport?, progressDone: Int, progressTotal: Int, onRunChecks: () -> Unit) {
+private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: HealthReport?, progressDone: Int, progressTotal: Int, workers: List<WorkerProgress>, activityLog: String, onRunChecks: () -> Unit) {
     val groups = remember(sources) { groupSources(sources) }
-    Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Text("Activity", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        Text("Health check results", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-        Card(shape = RoundedCornerShape(18.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        item { Text("Activity", fontSize = 24.sp, fontWeight = FontWeight.Bold) }
+        item { Text("Health check results", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp) }
+        item { Card(shape = RoundedCornerShape(18.dp)) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Inventory2, null, tint = Color(0xFF16B8A6), modifier = Modifier.size(28.dp))
                 Spacer(Modifier.width(12.dp))
                 Column { Text("Source index", fontWeight = FontWeight.SemiBold); Text("${sources.count { it.host.endsWith(".onion", true) }} onion URLs and ${sources.size - sources.count { it.host.endsWith(".onion", true) }} clear-web URLs in ${groups.size} groups", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
-        Card(shape = RoundedCornerShape(18.dp)) {
+        } }
+        item { Card(shape = RoundedCornerShape(18.dp)) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 val pulse = rememberInfiniteTransition(label = "monitoringPulse")
                 val rotation by pulse.animateFloat(initialValue = 0f, targetValue = if (checking) 360f else 0f, animationSpec = infiniteRepeatable(animation = tween(1800, easing = LinearEasing), repeatMode = RepeatMode.Restart), label = "monitoringRotation")
@@ -1009,11 +1030,38 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                 }
             }
         }
+        } }
+        if (checking) {
+            item {
+                Card(shape = RoundedCornerShape(16.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Live workers", fontWeight = FontWeight.SemiBold)
+                        Text("${workers.count { it.status == "Checking" }} URL slots currently checking • ${workers.count { it.status == "Waiting" }} waiting", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("16 worker groups × up to 8 URL slots each. A slot handles one URL at a time.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        workers.forEach { worker ->
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("${worker.id}: ${worker.status}", fontWeight = FontWeight.Medium, fontSize = 12.sp)
+                                if (worker.url.isNotBlank()) Text(worker.url, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+            item {
+                Card(shape = RoundedCornerShape(16.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Live activity log", fontWeight = FontWeight.SemiBold)
+                        Text("Plain-text updates from the current scan", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(activityLog, fontSize = 10.sp, lineHeight = 14.sp)
+                    }
+                }
+            }
+        }
         if (checking && report?.results.isNullOrEmpty()) {
-            repeat(3) { SkeletonSourceCard() }
+            items(3) { SkeletonSourceCard() }
         }
         groups.filter { group -> group.urls.any { report?.results?.containsKey(it) == true } }.forEach { group ->
-            Card(shape = RoundedCornerShape(14.dp)) {
+            item { Card(shape = RoundedCornerShape(14.dp)) {
                 Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(group.name, fontWeight = FontWeight.SemiBold)
                     group.entries.filter { report?.results?.containsKey(it.url) == true }.forEach { entry ->
@@ -1028,7 +1076,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                         Text(result.detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-            }
+            } }
         }
     }
 }

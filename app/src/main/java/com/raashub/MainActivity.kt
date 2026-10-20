@@ -268,7 +268,7 @@ private fun findTorSocksProxy(): Int? {
     return null
 }
 
-private fun checkOnionSchemes(urlText: String, proxyPort: Int): HealthResult {
+private suspend fun checkOnionSchemes(urlText: String, proxyPort: Int): HealthResult {
     val uri = Uri.parse(urlText)
     val scheme = (uri.scheme ?: "http").lowercase()
     val alternate = if (scheme == "https") "http" else "https"
@@ -290,8 +290,11 @@ private fun checkOnionSchemes(urlText: String, proxyPort: Int): HealthResult {
 
     // Always test both protocols. Onion services may publish HTTP URLs while also
     // serving HTTPS, or publish HTTPS URLs while only accepting HTTP.
-    val primary = probeWithRetries(primaryUrl)
-    val alternateResult = probeWithRetries(alternateUrl)
+    val (primary, alternateResult) = kotlinx.coroutines.coroutineScope {
+        val first = async(Dispatchers.IO) { probeWithRetries(primaryUrl) }
+        val second = async(Dispatchers.IO) { probeWithRetries(alternateUrl) }
+        first.await() to second.await()
+    }
     val candidates = listOf(primary, alternateResult)
     val selected = candidates.maxByOrNull { result ->
         when {
@@ -308,8 +311,8 @@ private fun checkOnionSchemes(urlText: String, proxyPort: Int): HealthResult {
         if (scheme == "http") primary.responseCode?.let { "HTTP $it" } ?: primary.error.ifBlank { primary.status }
         else alternateResult.responseCode?.let { "HTTP $it" } ?: alternateResult.error.ifBlank { alternateResult.status }
     combinedHeaders["x-raashub-https-probe"] =
-        if (scheme == "https") primary.responseCode?.let { "HTTPS HTTP $it" } ?: primary.error.ifBlank { primary.status }
-        else alternateResult.responseCode?.let { "HTTPS HTTP $it" } ?: alternateResult.error.ifBlank { alternateResult.status }
+        if (scheme == "https") primary.responseCode?.let { "HTTP $it" } ?: primary.error.ifBlank { primary.status }
+        else alternateResult.responseCode?.let { "HTTP $it" } ?: alternateResult.error.ifBlank { alternateResult.status }
     val reachable = candidates.filter { it.responseCode != null }
     val summary = candidates.joinToString("; ") { result ->
         val isHttps = Uri.parse(result.finalUrl.ifBlank { urlText }).scheme.equals("https", true)

@@ -93,8 +93,7 @@ def clean_file(path):
             else:
                 urls_removed += 1
                 changed = True
-        if len(kept) != len(row["links"]):
-            row["links"] = kept
+        row["links"] = kept
 
     # Remove now-empty group rows from the master directory, but keep individual
     # group files as metadata records so their provenance is not lost.

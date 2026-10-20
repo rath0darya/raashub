@@ -682,7 +682,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
             }
         }
         item { Text("Source groups", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
-        items(groups.take(5)) { SourceCard(it) { onExplore() } }
+        items(groups.take(5)) { SourceCard(it, emptyList()) { onExplore() } }
     }
 }
 

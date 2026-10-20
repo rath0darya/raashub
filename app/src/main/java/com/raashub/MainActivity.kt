@@ -280,6 +280,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         }
     }
 
+    var onionProxyPort: Int? = null
     kotlinx.coroutines.coroutineScope {
         // This job starts immediately and uses direct sockets for non-onion hosts.
         val clearWebJob = launch {
@@ -305,17 +306,20 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                     if (ready) port else null
                 } else null
             }
+            onionProxyPort = proxyPort
             publishWorker(
                 "Onion crawler",
                 if (proxyPort == null && onionSources.isNotEmpty()) "Tor unavailable" else "Tor ready",
-                if (proxyPort == null) "Onion URLs will be marked unverified; clear-web continues independently" else "SOCKS port $proxyPort"
-            , log = if (proxyPort == null && onionSources.isNotEmpty())
-                "Tor is unavailable; onion URLs cannot be checked. Clear-web crawler is not affected."
-            else "Tor readiness check complete; onion crawler starting.")
+                if (proxyPort == null) "Onion URLs will be marked unverified; clear-web continues independently" else "SOCKS port $proxyPort",
+                log = if (proxyPort == null && onionSources.isNotEmpty())
+                    "Tor is unavailable; onion URLs cannot be checked. Clear-web crawler is not affected."
+                else "Tor readiness check complete; onion crawler starting."
+            )
             runCrawler("Onion crawler", onionSources, slotsPerCrawler, proxyPort)
         }
 
-        joinAll(clearWebJob, onionJob)
+        clearWebJob.join()
+        onionJob.join()
     }
 
     val finalResults = results.toMap()
@@ -324,7 +328,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val online = finalResults.values.count { it.status == "Online" }
     val unverified = finalResults.values.count { it.status == "Unverified" }
     val message = "Processed ${finalResults.size}/${allSources.size} URLs. Separate crawlers: ${clearWebSources.size} clear-web URLs direct; ${onionSources.size} onion URLs via Tor only. Worker pool: 64 direct + 64 Tor URL slots (maximum 128 total); HTTP/HTTPS probes independently capped at 256. Peak active URL jobs: ${peakActiveUrls.get()}. $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. Tor unavailable means only onion URLs are unverified; direct checks are independent."
-    return HealthReport(onionSources.isEmpty() || liveWorkers["Onion crawler"]?.status == "Tor ready", liveWorkers["Onion crawler"]?.url?.removePrefix("SOCKS port ")?.toIntOrNull(), message, finalResults)
+    return HealthReport(onionSources.isEmpty() || onionProxyPort != null, onionProxyPort, message, finalResults)
 }
 private fun isTorCircuitReady(proxyPort: Int): Boolean {
     return try {

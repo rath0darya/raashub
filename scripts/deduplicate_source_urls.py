@@ -7,6 +7,7 @@ URL identity ignores scheme and trailing slashes but preserves path case and
 query strings, since paths can be case-sensitive.
 """
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -24,6 +25,11 @@ def url_key(raw):
     value = str(raw or "").strip().rstrip(".,;)")
     if not value:
         return None
+    for _ in range(4):
+        nested = re.match(r"(?i)^https?://[^/]+/(https?://.+)$", value)
+        if not nested:
+            break
+        value = nested.group(1)
     if not value.lower().startswith(("http://", "https://")):
         value = "http://" + value
     try:

@@ -203,16 +203,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
             async(Dispatchers.IO) {
                 semaphore.withPermit {
                     try {
-                        var result = checkOneOnionAttempt(entry.url, proxyPort, 45000)
-                        if (result.status == "Unverified" && result.error.contains("Timed out", ignoreCase = true)) {
-                            result = checkOneOnionAttempt(entry.url, proxyPort, 90000)
-                        }
-                        if (result.status == "Unverified" && result.error.contains("Timed out", ignoreCase = true)) {
-                            // Final slow-service pass: allow up to three minutes for the Tor
-                            // connection, TLS handshake and HTTP response headers to complete.
-                            result = checkOneOnionAttempt(entry.url, proxyPort, 180000)
-                        }
-                        entry.url to result
+                        entry.url to checkOnionSchemes(entry.url, proxyPort)
                     } finally {
                         val done = completed.incrementAndGet()
                         withContext(Dispatchers.Main) { onProgress(done, onionSources.size) }
@@ -275,6 +266,67 @@ private fun findTorSocksProxy(): Int? {
         } catch (_: Exception) { /* Not a usable local SOCKS5 proxy. */ }
     }
     return null
+}
+
+private fun checkOnionSchemes(urlText: String, proxyPort: Int): HealthResult {
+    val uri = Uri.parse(urlText)
+    val scheme = (uri.scheme ?: "http").lowercase()
+    val alternate = if (scheme == "https") "http" else "https"
+    val primaryUrl = uri.buildUpon().scheme(scheme).build().toString()
+    val alternateUrl = uri.buildUpon().scheme(alternate).build().toString()
+
+    fun probeWithRetries(url: String): HealthResult {
+        var result = checkOneOnionAttempt(url, proxyPort, 45000)
+        if (result.status == "Unverified" &&
+            (result.error.contains("Timed out", true) || result.error.contains("TLS/HTTPS handshake failed", true))) {
+            result = checkOneOnionAttempt(url, proxyPort, 90000)
+        }
+        if (result.status == "Unverified" &&
+            (result.error.contains("Timed out", true) || result.error.contains("TLS/HTTPS handshake failed", true))) {
+            result = checkOneOnionAttempt(url, proxyPort, 180000)
+        }
+        return result
+    }
+
+    // Always test both protocols. Onion services may publish HTTP URLs while also
+    // serving HTTPS, or publish HTTPS URLs while only accepting HTTP.
+    val primary = probeWithRetries(primaryUrl)
+    val alternateResult = probeWithRetries(alternateUrl)
+    val candidates = listOf(primary, alternateResult)
+    val selected = candidates.maxByOrNull { result ->
+        when {
+            result.responseCode != null && result.responseCode in 200..399 -> 5
+            result.responseCode != null && result.responseCode in 400..499 -> 4
+            result.responseCode != null -> 3
+            result.error.contains("TLS/HTTPS handshake failed", true) -> 1
+            else -> 0
+        }
+    } ?: primary
+    val combinedHeaders = linkedMapOf<String, String>()
+    combinedHeaders.putAll(selected.headers)
+    combinedHeaders["x-raashub-http-probe"] =
+        if (scheme == "http") primary.responseCode?.let { "HTTP $it" } ?: primary.error.ifBlank { primary.status }
+        else alternateResult.responseCode?.let { "HTTP $it" } ?: alternateResult.error.ifBlank { alternateResult.status }
+    combinedHeaders["x-raashub-https-probe"] =
+        if (scheme == "https") primary.responseCode?.let { "HTTPS HTTP $it" } ?: primary.error.ifBlank { primary.status }
+        else alternateResult.responseCode?.let { "HTTPS HTTP $it" } ?: alternateResult.error.ifBlank { alternateResult.status }
+    val reachable = candidates.filter { it.responseCode != null }
+    val summary = candidates.joinToString("; ") { result ->
+        val isHttps = Uri.parse(result.finalUrl.ifBlank { urlText }).scheme.equals("https", true)
+        "${if (isHttps) "HTTPS" else "HTTP"}: ${result.responseCode?.let { "HTTP $it" } ?: result.error.ifBlank { result.status }}"
+    }
+    return selected.copy(
+        detail = summary,
+        finalUrl = selected.finalUrl.ifBlank { primaryUrl },
+        headers = combinedHeaders,
+        status = when {
+            reachable.any { it.responseCode in 200..399 } -> "Online"
+            reachable.any { it.responseCode in 400..499 } -> "Responding"
+            reachable.any { it.responseCode != null } -> "Server error"
+            else -> "Unverified"
+        },
+        error = if (reachable.isEmpty()) listOf(primary.error, alternateResult.error).filter { it.isNotBlank() }.distinct().joinToString(" | ") else ""
+    )
 }
 
 private fun checkOneOnionAttempt(urlText: String, proxyPort: Int, readTimeoutMs: Int): HealthResult {

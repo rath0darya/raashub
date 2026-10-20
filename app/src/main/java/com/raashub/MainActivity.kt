@@ -189,7 +189,13 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val onionSources = allSources.filter { it.host.endsWith(".onion", ignoreCase = true) }
     // Publish scan start immediately. Waiting for an entire Tor circuit here used to
     // make the UI appear frozen for up to 90 seconds before any URL job began.
-    withContext(Dispatchers.Main) { onProgress(0, allSources.size) }
+    withContext(Dispatchers.Main) {
+        onProgress(0, allSources.size)
+        onWorkerUpdate(
+            listOf(WorkerProgress("Connection check", "Preparing", if (onionSources.isEmpty()) "Checking clear-web URLs directly" else "Checking that Tor can reach a test website")),
+            "Starting the scan. First, RaaSHub checks that the secure connection is actually working; URLs are not marked offline just because a request times out."
+        )
+    }
     val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
         // A listening SOCKS port is not proof that Tor has a working circuit.
         // Starting 128 onion requests before circuit readiness can cause a wave of

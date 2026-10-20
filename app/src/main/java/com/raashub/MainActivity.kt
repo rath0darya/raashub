@@ -1017,7 +1017,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Live monitoring", fontWeight = FontWeight.SemiBold)
-                    Text(if (checking) "Health checks are running…" else report?.message?.takeIf { report.torAvailable } ?: "No live checks yet.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (checking) "Health checks are running…" else report?.message ?: "No live checks yet.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (checking) {
                         val percent = if (progressTotal > 0) progressDone * 100 / progressTotal else 0
                         Spacer(Modifier.height(12.dp))
@@ -1040,11 +1040,11 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
             }
         }
         } }
-        if (checking) {
+        if (checking || workers.isNotEmpty()) {
             item {
                 Card(shape = RoundedCornerShape(16.dp)) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Live workers", fontWeight = FontWeight.SemiBold)
+                        Text(if (checking) "Live workers" else "Last worker activity", fontWeight = FontWeight.SemiBold)
                         Text("${workers.count { it.status == "Checking" }} URL slots currently checking • ${workers.count { it.status == "Waiting" }} waiting", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("16 worker groups × up to 8 URL slots each. A slot handles one URL at a time.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         workers.forEach { worker ->
@@ -1059,7 +1059,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
             item {
                 Card(shape = RoundedCornerShape(16.dp)) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Live activity log", fontWeight = FontWeight.SemiBold)
+                        Text(if (checking) "Live activity log" else "Last scan activity log", fontWeight = FontWeight.SemiBold)
                         Text("Plain-text updates from the current scan", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(activityLog, fontSize = 10.sp, lineHeight = 14.sp)
                     }

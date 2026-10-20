@@ -602,7 +602,7 @@ private fun HubApp(sources: List<OnionEntry>) {
         if (!checking) {
             checking = true
             progressDone = 0
-            progressTotal = sources.count { it.host.endsWith(".onion", true) }
+            progressTotal = sources.distinctBy { it.url.lowercase() }.size
             (context as? MainActivity)?.showMonitoringNotification(0, progressTotal, false)
             scope.launch {
                 val completedReport = checkOnionSources(sources) { done, total ->
@@ -686,7 +686,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                         cm.setPrimaryClip(android.content.ClipData.newPlainText("RaaSHub onion URL", url))
                     }, onOpen = { url -> if (context is MainActivity) context.openOnionUrl(url) else runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage("org.torproject.torbrowser")) } })
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
-                    tab == Tab.SOURCES -> Sources(sources, search, { search = it }, sourceFilter, { sourceFilter = it }) { selected = it }
+                    tab == Tab.SOURCES -> Sources(sources, search, { search = it }, sourceFilter, { sourceFilter = it }, healthReport?.results.orEmpty()) { selected = it }
                     tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, progressDone, progressTotal, runHealthChecks)
                     else -> Settings(healthReport, sources.size, darkMode, { enabled -> darkMode = enabled; themePrefs.edit().putBoolean("dark_mode", enabled).apply() }) { (context as? MainActivity)?.openNotificationSettings() } 
                 }
@@ -731,7 +731,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
             }
         }
         item { Text("Source groups", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
-        items(groups.take(5)) { SourceCard(it) { onExplore() } }
+        items(groups.take(5)) { SourceCard(it, report?.results.orEmpty()) { onExplore() } }
     }
 }
 
@@ -758,7 +758,7 @@ private fun StateLine(label: String, value: String, tint: Color) {
 }
 
 @Composable
-private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) -> Unit, sourceFilter: String, onFilter: (String) -> Unit, onSelect: (OnionGroup) -> Unit) {
+private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) -> Unit, sourceFilter: String, onFilter: (String) -> Unit, health: Map<String, HealthResult>, onSelect: (OnionGroup) -> Unit) {
     val groups = remember(sources) { groupSources(sources) }
     val categories = remember(sources) { sources.map { it.category.lowercase() }.distinct().sorted() }
     val filtered = remember(groups, query, sourceFilter) { groups.filter { group ->
@@ -794,14 +794,29 @@ private fun Sources(sources: List<OnionEntry>, query: String, onQuery: (String) 
         if (filtered.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (sources.isEmpty()) "No sources available." else "No matching sources") }
         } else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
-            items(filtered, key = { it.name }) { group -> SourceCard(group) { onSelect(group) } }
+            items(filtered, key = { it.name }) { group -> SourceCard(group, health) { onSelect(group) } }
         }
     }
 }
 
 @Composable
-private fun SourceCard(group: OnionGroup, onClick: () -> Unit) {
-    Card(Modifier.fillMaxWidth().clickable(onClick = onClick), shape = RoundedCornerShape(17.dp)) {
+private fun responseStatusColor(result: HealthResult?): Color = when {
+    result == null -> Color(0xFF8792A2)
+    result.responseCode in 100..199 -> Color(0xFF4DA6FF)
+    result.responseCode in 200..299 -> Color(0xFF19B77A)
+    result.responseCode in 300..399 -> Color(0xFF8B7CFF)
+    result.responseCode in 400..499 -> Color(0xFFFFB547)
+    result.responseCode in 500..599 -> Color(0xFFFF5D67)
+    result.error.contains("Timed out", true) -> Color(0xFFFF8A4C)
+    else -> Color(0xFF8792A2)
+}
+
+@Composable
+private fun SourceCard(group: OnionGroup, health: Map<String, HealthResult> = emptyMap(), onClick: () -> Unit) {
+    val groupResults = group.urls.mapNotNull { health[it] }
+    val responses = groupResults.count { it.responseCode != null }
+    val latestColor = groupResults.maxByOrNull { it.checkedAt }?.let { responseStatusColor(it) } ?: Color(0xFF8792A2)
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick), shape = RoundedCornerShape(17.dp), border = androidx.compose.foundation.BorderStroke(1.dp, latestColor.copy(alpha = .38f))) {
         Column(Modifier.fillMaxWidth()) {
             Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFF8B69E8).copy(alpha = .15f)) { Icon(Icons.Default.Language, null, Modifier.padding(9.dp), tint = Color(0xFF9B80FF)) }
@@ -810,8 +825,22 @@ private fun SourceCard(group: OnionGroup, onClick: () -> Unit) {
                     Text(group.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(group.urls.size.toString() + " URLs", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                     Text(group.urls.take(2).joinToString("  •  ") { Uri.parse(it).host ?: it }, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (groupResults.isNotEmpty()) {
+                        Spacer(Modifier.height(7.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Surface(shape = RoundedCornerShape(8.dp), color = latestColor.copy(alpha = .14f)) {
+                                Text("$responses/${group.urls.size} responded", modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = latestColor, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                            groupResults.groupBy { it.responseCode?.let { code -> (code / 100).toString() + "xx" } ?: if (it.error.contains("Timed out", true)) "Timeout" else "No response" }
+                                .entries.sortedBy { it.key }.take(4).forEach { (kind, entries) ->
+                                    Text("$kind ${entries.size}", fontSize = 10.sp, color = responseStatusColor(entries.firstOrNull()))
+                                }
+                        }
+                    } else {
+                        Text("Status not checked yet", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
-                Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(Icons.Default.ChevronRight, null, tint = latestColor)
             }
 
         }

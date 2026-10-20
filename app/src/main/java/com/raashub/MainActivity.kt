@@ -182,20 +182,21 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val onionSources = sources.filter { it.host.endsWith(".onion", ignoreCase = true) }.distinctBy { it.url.lowercase() }
     if (onionSources.isEmpty()) return HealthReport(false, null, "No onion URLs available to check.", emptyMap())
 
+    // Do not let Tor startup consume most of a short live scan.
     val proxyPort = withContext(Dispatchers.IO) {
-        val deadline = System.currentTimeMillis() + 90000L
+        val deadline = System.currentTimeMillis() + 30000L
         while (System.currentTimeMillis() < deadline) {
             val port = findTorSocksProxy()
             if (port != null && isTorCircuitReady(port)) return@withContext port
-            Thread.sleep(1500)
+            Thread.sleep(1000)
         }
         null
     }
     if (proxyPort == null) return HealthReport(false, null, "Tor proxy or Tor circuit did not become ready within 90 seconds. Check your internet connection and retry.", emptyMap())
 
-    // Keep Tor concurrency conservative, then retry timed-out services with progressively
-    // longer waits. Some onion services take minutes to establish a circuit or send headers.
-    val semaphore = Semaphore(3)
+    // Fast scan: keep concurrency bounded and never retry a stalled onion site.
+    // Both HTTP and HTTPS are still tested concurrently for every URL.
+    val semaphore = Semaphore(6)
     val completed = AtomicInteger(0)
     withContext(Dispatchers.Main) { onProgress(0, onionSources.size) }
     val results = kotlinx.coroutines.coroutineScope {
@@ -216,7 +217,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val timedOut = results.values.count { it.status == "Unverified" && it.error.contains("Timed out", ignoreCase = true) }
     return HealthReport(
         true, proxyPort,
-        "Checked all ${results.size} onion URLs. $responding responded; $timedOut still timed out after retries; ${results.size - responding - timedOut} had other errors. Slow services received retries up to 3 minutes each.",
+        "Checked all ${results.size} onion URLs using one 10-second response timeout per HTTP/HTTPS probe. $responding responded; $timedOut timed out; ${results.size - responding - timedOut} had other errors. Timed-out URLs can be checked again manually.",
         results
     )
 }
@@ -275,24 +276,15 @@ private suspend fun checkOnionSchemes(urlText: String, proxyPort: Int): HealthRe
     val primaryUrl = uri.buildUpon().scheme(scheme).build().toString()
     val alternateUrl = uri.buildUpon().scheme(alternate).build().toString()
 
-    fun probeWithRetries(url: String): HealthResult {
-        var result = checkOneOnionAttempt(url, proxyPort, 45000)
-        if (result.status == "Unverified" &&
-            (result.error.contains("Timed out", true) || result.error.contains("TLS/HTTPS handshake failed", true))) {
-            result = checkOneOnionAttempt(url, proxyPort, 90000)
-        }
-        if (result.status == "Unverified" &&
-            (result.error.contains("Timed out", true) || result.error.contains("TLS/HTTPS handshake failed", true))) {
-            result = checkOneOnionAttempt(url, proxyPort, 180000)
-        }
-        return result
-    }
+    // One bounded attempt per protocol. A timeout means "unverified", not "offline".
+    // Keep HTTP and HTTPS parallel so a broken scheme does not block the other.
+    fun probe(url: String): HealthResult = checkOneOnionAttempt(url, proxyPort, 10000)
 
     // Always test both protocols. Onion services may publish HTTP URLs while also
     // serving HTTPS, or publish HTTPS URLs while only accepting HTTP.
     val (primary, alternateResult) = kotlinx.coroutines.coroutineScope {
-        val first = async(Dispatchers.IO) { probeWithRetries(primaryUrl) }
-        val second = async(Dispatchers.IO) { probeWithRetries(alternateUrl) }
+        val first = async(Dispatchers.IO) { probe(primaryUrl) }
+        val second = async(Dispatchers.IO) { probe(alternateUrl) }
         first.await() to second.await()
     }
     val candidates = listOf(primary, alternateResult)

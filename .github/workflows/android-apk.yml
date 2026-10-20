@@ -1,6 +1,7 @@
 name: Build RaaSHub Android APK
 
 on:
+  pull_request:
   push:
     branches: [main]
     paths-ignore:

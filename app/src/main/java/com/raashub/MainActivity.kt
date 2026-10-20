@@ -235,7 +235,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         liveLog.add("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}  $log")
         while (liveLog.size > 80) liveLog.removeAt(0)
         val snapshot = liveWorkers.values.sortedBy { it.id }
-        withContext(Dispatchers.Main) { onWorkerUpdate(snapshot, liveLog.joinToString("\\n")) }
+        withContext(Dispatchers.Main) { onWorkerUpdate(snapshot, liveLog.joinToString("\n")) }
     }
     kotlinx.coroutines.coroutineScope {
         val workerGroups = (0 until workerCount).map { groupIndex ->
@@ -682,7 +682,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                     // Never leave the Run button permanently disabled after a failed scan.
                     val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
                     val failure = HealthReport(false, null, "Scan failed: $reason", emptyMap())
-                    activityLog = (activityLog + "\\nScan stopped: $reason").takeLast(12000)
+                    activityLog = (activityLog + "\nScan stopped: $reason").takeLast(12000)
                     healthReport = failure
                     saveLatestHealthReport(context, failure)
                     Toast.makeText(context, failure.message, Toast.LENGTH_LONG).show()
@@ -1008,7 +1008,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                 Column { Text("Source index", fontWeight = FontWeight.SemiBold); Text("${sources.count { it.host.endsWith(".onion", true) }} onion URLs and ${sources.size - sources.count { it.host.endsWith(".onion", true) }} clear-web URLs in ${groups.size} groups", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
-        } }
+        }
         item { Card(shape = RoundedCornerShape(18.dp)) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 val pulse = rememberInfiniteTransition(label = "monitoringPulse")

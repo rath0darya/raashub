@@ -40,6 +40,9 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Permanently deduplicate source URLs
+        run: python3 scripts/deduplicate_source_urls.py
+
       - name: Generate offline onion source index
         run: python3 scripts/build_android_source_index.py
 

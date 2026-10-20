@@ -193,14 +193,22 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     }
     if (proxyPort == null) return HealthReport(false, null, "Tor proxy or Tor circuit did not become ready within 90 seconds. Check your internet connection and retry.", emptyMap())
 
-    val semaphore = Semaphore(24)
+    // Tor circuits are expensive to establish; high parallelism can overload the local proxy.
+    val semaphore = Semaphore(4)
     val completed = AtomicInteger(0)
     withContext(Dispatchers.Main) { onProgress(0, onionSources.size) }
     val results = kotlinx.coroutines.coroutineScope {
         onionSources.map { entry ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
-                    try { entry.url to checkOneOnion(entry.url, proxyPort) }
+                    try {
+                        var result = checkOneOnionAttempt(entry.url, proxyPort, 12000)
+                        if (result.status == "Unverified" && result.error.contains("Timed out", ignoreCase = true)) {
+                            // Give slow onion services one longer retry before marking them unverified.
+                            result = checkOneOnionAttempt(entry.url, proxyPort, 18000)
+                        }
+                        entry.url to result
+                    }
                     finally {
                         val done = completed.incrementAndGet()
                         withContext(Dispatchers.Main) { onProgress(done, onionSources.size) }
@@ -264,7 +272,7 @@ private fun findTorSocksProxy(): Int? {
     return null
 }
 
-private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
+private fun checkOneOnionAttempt(urlText: String, proxyPort: Int, readTimeoutMs: Int): HealthResult {
     val checkedAt = System.currentTimeMillis()
     return try {
         val uri = Uri.parse(urlText)
@@ -274,8 +282,8 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
         if (scheme != "http" && scheme != "https") throw IOException("Unsupported URL scheme")
         val port = if (uri.port > 0) uri.port else if (scheme == "https") 443 else 80
         val raw = Socket()
-        raw.connect(InetSocketAddress("127.0.0.1", proxyPort), 1500)
-        raw.soTimeout = 3500
+        raw.connect(InetSocketAddress("127.0.0.1", proxyPort), 5000)
+        raw.soTimeout = readTimeoutMs
         try {
             val out = raw.getOutputStream()
             out.write(byteArrayOf(5, 1, 0)); out.flush()
@@ -302,7 +310,7 @@ private fun checkOneOnion(urlText: String, proxyPort: Int): HealthResult {
                 ssl
             } else raw
             active.use { connection ->
-                connection.soTimeout = 3500
+                connection.soTimeout = readTimeoutMs
                 val path = (uri.encodedPath?.takeIf { it.isNotEmpty() } ?: "/") + (uri.encodedQuery?.let { "?$it" } ?: "")
                 val request = "GET $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: RaaSHub-HealthCheck/1.0\r\nRange: bytes=0-32767\r\nConnection: close\r\n\r\n"
                 connection.getOutputStream().write(request.toByteArray(StandardCharsets.ISO_8859_1))
@@ -776,7 +784,7 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
                         if (result != null) {
                             Text("General", fontWeight = FontWeight.Bold)
                             DetailLine("FQDN", host)
-                            DetailLine("Title", result.title.ifBlank { "Skipped in fast status check" })
+                            DetailLine("Page title", result.title.ifBlank { "Not fetched in headers-only health check" })
                             DetailLine("Type", entry.category.replaceFirstChar { it.uppercase() })
                             DetailLine("Slug / URL", entry.url)
                             DetailLine("Enabled", "Enabled")
@@ -800,7 +808,7 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
                             }
                             Text("Check detail: ${result.detail}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         } else {
-                            Text("Run a live check to retrieve HTTP status, page title, server details and response headers.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Run a live check to retrieve HTTP status and response headers. Page content is not downloaded in this fast check.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick = { onCopy(entry.url) }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy") }

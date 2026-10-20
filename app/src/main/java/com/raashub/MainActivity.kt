@@ -76,6 +76,20 @@ import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import java.util.concurrent.atomic.AtomicInteger
 
+private fun normalizeSourceUrl(raw: String): String? {
+    var value = raw.trim().trimEnd('.', ',', ';', ')')
+    if (value.isBlank()) return null
+    // Repair malformed entries such as https://junk/http://real-service.onion.
+    repeat(4) {
+        val nested = Regex("(?i)^https?://[^/]+/(https?://.+)$").find(value)
+        if (nested != null) value = nested.groupValues[1]
+    }
+    if (!value.startsWith("http://", true) && !value.startsWith("https://", true)) value = "http://$value"
+    val parsed = Uri.parse(value)
+    if (parsed.host.isNullOrBlank() || parsed.scheme?.lowercase() !in setOf("http", "https")) return null
+    return value
+}
+
 private data class OnionEntry(val url: String, val entity: String, val source: String, val category: String = "other") {
     val host: String get() = runCatching { Uri.parse(url).host ?: url }.getOrDefault(url)
 }
@@ -181,14 +195,14 @@ private fun httpDateToIst(value: String): String = runCatching {
 }.getOrDefault(value)
 
 @OptIn(ExperimentalCoroutinesApi::class)
-private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (Int, Int) -> Unit): HealthReport {
+private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (Int, Int, String) -> Unit): HealthReport {
     val allSources = sources.distinctBy { it.url.trim().lowercase() }
     if (allSources.isEmpty()) return HealthReport(false, null, "No URLs are available to check.", emptyMap())
 
     val onionSources = allSources.filter { it.host.endsWith(".onion", ignoreCase = true) }
     // Publish scan start immediately. Waiting for an entire Tor circuit here used to
     // make the UI appear frozen for up to 90 seconds before any URL job began.
-    withContext(Dispatchers.Main) { onProgress(0, allSources.size) }
+    withContext(Dispatchers.Main) { onProgress(0, allSources.size, "Preparing to check ${allSources.size} websites…") }
     val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
         // Only wait briefly for the local SOCKS listener. A circuit may take longer;
         // Tor can establish it while the first requests are already in flight.
@@ -217,15 +231,23 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val completed = AtomicInteger(0)
     val activeUrls = AtomicInteger(0)
     val peakActiveUrls = AtomicInteger(0)
+    val workerUrls = Array(workerCount) { java.util.concurrent.ConcurrentHashMap.newKeySet<String>() }
+    fun workerSnapshot(): String = (0 until workerCount).joinToString("\n") { index ->
+        val urls = workerUrls[index].toList().sorted()
+        if (urls.isEmpty()) "Worker ${index + 1}: waiting for a website"
+        else "Worker ${index + 1}: checking ${urls.size}/8 website(s) — ${urls.joinToString(", ") { url -> Uri.parse(url).host ?: url }}"
+    }
     val results = java.util.concurrent.ConcurrentHashMap<String, HealthResult>()
     kotlinx.coroutines.coroutineScope {
-        val workerGroups = (0 until workerCount).map {
+        val workerGroups = (0 until workerCount).mapIndexed { workerIndex, _ ->
             launch {
                 val slots = (0 until urlsPerWorker).map {
                     launch {
                         for (entry in queue) {
                             val active = activeUrls.incrementAndGet()
                             peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
+                            workerUrls[workerIndex].add(entry.url)
+                            withContext(Dispatchers.Main) { onProgress(completed.get(), allSources.size, workerSnapshot()) }
                             try {
                                 val result = try {
                                     checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
@@ -235,9 +257,10 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                                 }
                                 results[entry.url] = result
                             } finally {
+                                workerUrls[workerIndex].remove(entry.url)
                                 activeUrls.decrementAndGet()
                                 val done = completed.incrementAndGet()
-                                withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
+                                withContext(Dispatchers.Main) { onProgress(done, allSources.size, workerSnapshot()) }
                             }
                         }
                     }
@@ -452,9 +475,9 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
         } finally { runCatching { raw.close() } }
     } catch (e: Exception) {
         val reason = when (e) {
-            is java.net.SocketTimeoutException -> "Timed out through Tor"
+            is java.net.SocketTimeoutException -> if (isOnion) "Timed out while checking this onion site through Tor" else "The website did not respond before the time limit"
             is javax.net.ssl.SSLException -> "TLS/HTTPS handshake failed"
-            is java.net.ConnectException -> "Connection refused or unreachable through Tor"
+            is java.net.ConnectException -> if (isOnion) "Could not connect to this onion site through Tor" else "Could not connect to the website"
             else -> e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
         }
         HealthResult("Unverified", reason, checkedAt, finalUrl = urlText, error = reason)
@@ -599,9 +622,7 @@ class MainActivity : ComponentActivity() {
         buildList {
             for (i in 0 until array.length()) {
                 val item = array.optJSONObject(i) ?: continue
-                var url = item.optString("url").trim()
-                if (url.isBlank()) continue
-                if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) url = "http://$url"
+                val url = normalizeSourceUrl(item.optString("url")) ?: continue
                 add(OnionEntry(url, item.optString("entity", "Unnamed source"), item.optString("source", "Source list"), item.optString("category", "other").lowercase()))
             }
         }.distinctBy { it.url.lowercase() }.sortedBy { it.host.lowercase() }
@@ -629,6 +650,7 @@ private fun HubApp(sources: List<OnionEntry>) {
     var healthReport by remember { mutableStateOf(loadLatestHealthReport(context)) }
     var progressDone by remember { mutableIntStateOf(0) }
     var progressTotal by remember { mutableIntStateOf(0) }
+    var liveWorkerStatus by remember { mutableStateOf("Workers will appear here when a check starts.") }
     var lastBackPressed by remember { mutableLongStateOf(0L) }
     val scope = rememberCoroutineScope()
     val runHealthChecks: () -> Unit = {
@@ -639,9 +661,10 @@ private fun HubApp(sources: List<OnionEntry>) {
             (context as? MainActivity)?.showMonitoringNotification(0, progressTotal, false)
             scope.launch {
                 try {
-                    val completedReport = checkOnionSources(sources) { done, total ->
+                    val completedReport = checkOnionSources(sources) { done, total, workerStatus ->
                         progressDone = done
                         progressTotal = total
+                        liveWorkerStatus = workerStatus
                         (context as? MainActivity)?.showMonitoringNotification(done, total, false)
                     }
                     healthReport = completedReport
@@ -733,7 +756,7 @@ private fun HubApp(sources: List<OnionEntry>) {
                     }, onOpen = { url -> if (context is MainActivity) context.openOnionUrl(url) else runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage("org.torproject.torbrowser")) } })
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
                     tab == Tab.SOURCES -> Sources(sources, search, { search = it }, sourceFilter, { sourceFilter = it }, healthReport?.results.orEmpty()) { selected = it }
-                    tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, progressDone, progressTotal, runHealthChecks)
+                    tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, progressDone, progressTotal, liveWorkerStatus, runHealthChecks)
                     else -> Settings(healthReport, sources.size, darkMode, { enabled -> darkMode = enabled; themePrefs.edit().putBoolean("dark_mode", enabled).apply() }) { (context as? MainActivity)?.openNotificationSettings() } 
                 }
             }
@@ -967,7 +990,7 @@ private fun DetailLine(label: String, value: String) {
 }
 
 @Composable
-private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: HealthReport?, progressDone: Int, progressTotal: Int, onRunChecks: () -> Unit) {
+private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: HealthReport?, progressDone: Int, progressTotal: Int, workerStatus: String, onRunChecks: () -> Unit) {
     val groups = remember(sources) { groupSources(sources) }
     Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("Activity", fontSize = 24.sp, fontWeight = FontWeight.Bold)
@@ -1005,6 +1028,17 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                         if (checking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.PlayArrow, null)
                         Spacer(Modifier.width(6.dp))
                         Text(if (checking) "Checking…" else "Run health checks")
+                    }
+                }
+            }
+        }
+        if (checking) {
+            Card(shape = RoundedCornerShape(18.dp)) {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Workers in progress", fontWeight = FontWeight.SemiBold)
+                    Text("Each worker can check up to 8 websites at once. The list updates while checks are running.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Box(Modifier.fillMaxWidth().heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                        Text(workerStatus, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }

@@ -21,10 +21,11 @@ urls_removed = 0
 urls_seen = 0
 
 
-def url_key(raw):
+def normalize_url(raw):
     value = str(raw or "").strip().rstrip(".,;)")
     if not value:
         return None
+    # Remove accidental outer URLs that wrap a real protocol URL.
     for _ in range(4):
         nested = re.match(r"(?i)^https?://[^/]+/(https?://.+)$", value)
         if not nested:
@@ -34,13 +35,21 @@ def url_key(raw):
         value = "http://" + value
     try:
         parsed = urlsplit(value)
-        if not parsed.hostname:
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
             return None
-        return (parsed.hostname.lower() + parsed.path.rstrip("/")
-                + ("?" + parsed.query if parsed.query else "")
-                + ("#" + parsed.fragment if parsed.fragment else ""))
     except ValueError:
-        return value.lower().rstrip("/")
+        return None
+    return value
+
+
+def url_key(raw):
+    value = normalize_url(raw)
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    return (parsed.hostname.lower() + parsed.path.rstrip("/")
+            + ("?" + parsed.query if parsed.query else "")
+            + ("#" + parsed.fragment if parsed.fragment else ""))
 
 
 def clean_file(path):
@@ -68,7 +77,15 @@ def clean_file(path):
                 kept.append(link)
                 continue
             urls_seen += 1
-            key = url_key(raw)
+            normalized = normalize_url(raw)
+            if normalized is not None and normalized != str(raw):
+                changed = True
+                if isinstance(link, str):
+                    link = normalized
+                else:
+                    link = dict(link)
+                    link["url"] = normalized
+            key = url_key(normalized if normalized is not None else raw)
             if key is None or key not in seen:
                 if key is not None:
                     seen.add(key)

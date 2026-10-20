@@ -27,7 +27,11 @@ def normalize_url(raw):
 
 
 def key_for(url):
-    return url.lower().rstrip("/")
+    """Deduplicate URL identities across scheme and trailing-slash variants."""
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    path = parsed.path.rstrip("/")
+    return host + path + ("?" + parsed.query if parsed.query else "") + ("#" + parsed.fragment if parsed.fragment else "")
 
 
 # The structured directory contains group/market labels and both onion and clear-web links.

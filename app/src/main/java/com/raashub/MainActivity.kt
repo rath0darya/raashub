@@ -186,15 +186,19 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     if (allSources.isEmpty()) return HealthReport(false, null, "No URLs are available to check.", emptyMap())
 
     val onionSources = allSources.filter { it.host.endsWith(".onion", ignoreCase = true) }
+    // Publish scan start immediately. Waiting for an entire Tor circuit here used to
+    // make the UI appear frozen for up to 90 seconds before any URL job began.
+    withContext(Dispatchers.Main) { onProgress(0, allSources.size) }
     val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
-        // Tor readiness is checked before the URL workers start, but the wait is bounded.
-        val deadline = System.currentTimeMillis() + 90000L
-        while (System.currentTimeMillis() < deadline) {
-            val port = findTorSocksProxy()
-            if (port != null && isTorCircuitReady(port)) return@withContext port
-            Thread.sleep(1000)
+        // Only wait briefly for the local SOCKS listener. A circuit may take longer;
+        // Tor can establish it while the first requests are already in flight.
+        val deadline = System.currentTimeMillis() + 15000L
+        var port: Int? = null
+        while (port == null && System.currentTimeMillis() < deadline) {
+            port = findTorSocksProxy()
+            if (port == null) Thread.sleep(500)
         }
-        null
+        port
     }
 
     // 16 worker groups × 8 long-lived URL slots = 128 independently scheduled URL jobs.
@@ -214,8 +218,6 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val activeUrls = AtomicInteger(0)
     val peakActiveUrls = AtomicInteger(0)
     val results = java.util.concurrent.ConcurrentHashMap<String, HealthResult>()
-    withContext(Dispatchers.Main) { onProgress(0, allSources.size) }
-
     kotlinx.coroutines.coroutineScope {
         val workerGroups = (0 until workerCount).map {
             launch {
@@ -636,18 +638,31 @@ private fun HubApp(sources: List<OnionEntry>) {
             progressTotal = sources.distinctBy { it.url.lowercase() }.size
             (context as? MainActivity)?.showMonitoringNotification(0, progressTotal, false)
             scope.launch {
-                val completedReport = checkOnionSources(sources) { done, total ->
-                    progressDone = done
-                    progressTotal = total
-                    (context as? MainActivity)?.showMonitoringNotification(done, total, false)
+                try {
+                    val completedReport = checkOnionSources(sources) { done, total ->
+                        progressDone = done
+                        progressTotal = total
+                        (context as? MainActivity)?.showMonitoringNotification(done, total, false)
+                    }
+                    healthReport = completedReport
+                    saveLatestHealthReport(context, completedReport)
+                    (context as? MainActivity)?.showMonitoringNotification(
+                        progressTotal, progressTotal, true,
+                        completedReport.message
+                    )
+                } catch (e: Exception) {
+                    // Never leave the Run button permanently disabled after a failed scan.
+                    val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                    val failure = HealthReport(false, null, "Scan failed: $reason", emptyMap())
+                    healthReport = failure
+                    saveLatestHealthReport(context, failure)
+                    Toast.makeText(context, failure.message, Toast.LENGTH_LONG).show()
+                    (context as? MainActivity)?.showMonitoringNotification(
+                        progressDone, progressTotal, true, failure.message
+                    )
+                } finally {
+                    checking = false
                 }
-                healthReport = completedReport
-                saveLatestHealthReport(context, completedReport)
-                checking = false
-                (context as? MainActivity)?.showMonitoringNotification(
-                    progressTotal, progressTotal, true,
-                    completedReport.message
-                )
             }
         }
     }

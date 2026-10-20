@@ -23,6 +23,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -407,10 +408,10 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
 
 private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs: Int): HealthResult {
     val checkedAt = System.currentTimeMillis()
+    val isOnion = Uri.parse(urlText).host.orEmpty().endsWith(".onion", ignoreCase = true)
     return try {
         val uri = Uri.parse(urlText)
         val host = uri.host ?: throw IOException("Invalid source URL")
-        val isOnion = host.endsWith(".onion", ignoreCase = true)
         val scheme = (uri.scheme ?: "http").lowercase()
         if (scheme != "http" && scheme != "https") throw IOException("Unsupported URL scheme")
         if (isOnion && proxyPort == null) throw IOException("Tor proxy unavailable; onion URL not checked")

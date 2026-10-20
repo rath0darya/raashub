@@ -76,6 +76,22 @@ import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import java.util.concurrent.atomic.AtomicInteger
 
+private fun normalizeSourceUrl(raw: String): String? {
+    var value = raw.trim().trimEnd('.', ',', ';', ')')
+    if (value.isBlank()) return null
+    // Repair malformed entries such as https://junk/http://real-service.onion.
+    repeat(4) {
+        val nested = Regex("(?i)^https?://[^/]+/(https?://.+)$").find(value)
+        if (nested != null) value = nested.groupValues[1]
+    }
+    if (!value.startsWith("http://", true) && !value.startsWith("https://", true)) {
+        value = "http://$value"
+    }
+    val parsed = Uri.parse(value)
+    if (parsed.host.isNullOrBlank() || parsed.scheme?.lowercase() !in setOf("http", "https")) return null
+    return value
+}
+
 private data class OnionEntry(val url: String, val entity: String, val source: String, val category: String = "other") {
     val host: String get() = runCatching { Uri.parse(url).host ?: url }.getOrDefault(url)
 }
@@ -628,9 +644,7 @@ class MainActivity : ComponentActivity() {
         buildList {
             for (i in 0 until array.length()) {
                 val item = array.optJSONObject(i) ?: continue
-                var url = item.optString("url").trim()
-                if (url.isBlank()) continue
-                if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) url = "http://$url"
+                val url = normalizeSourceUrl(item.optString("url")) ?: continue
                 add(OnionEntry(url, item.optString("entity", "Unnamed source"), item.optString("source", "Source list"), item.optString("category", "other").lowercase()))
             }
         }.distinctBy { it.url.lowercase() }.sortedBy { it.host.lowercase() }

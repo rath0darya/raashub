@@ -204,15 +204,36 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     // make the UI appear frozen for up to 90 seconds before any URL job began.
     withContext(Dispatchers.Main) { onProgress(0, allSources.size, "Preparing to check ${allSources.size} websites…") }
     val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
-        // Only wait briefly for the local SOCKS listener. A circuit may take longer;
-        // Tor can establish it while the first requests are already in flight.
         val deadline = System.currentTimeMillis() + 15000L
         var port: Int? = null
         while (port == null && System.currentTimeMillis() < deadline) {
             port = findTorSocksProxy()
-            if (port == null) Thread.sleep(500)
+            if (port == null) {
+                withContext(Dispatchers.Main) {
+                    onProgress(0, allSources.size, "Starting the secure connection before checking onion websites…")
+                }
+                Thread.sleep(500)
+            }
         }
         port
+    }
+    // Finding a local SOCKS port only proves the app can reach Tor locally. It does not
+    // prove Tor has a working circuit. Wait briefly for a real HTTP response before
+    // launching hundreds of requests into a circuit that may still be starting.
+    if (proxyPort != null && onionSources.isNotEmpty()) {
+        withContext(Dispatchers.IO) {
+            val deadline = System.currentTimeMillis() + 45000L
+            var ready = false
+            while (!ready && System.currentTimeMillis() < deadline) {
+                ready = isTorCircuitReady(proxyPort)
+                if (!ready) {
+                    withContext(Dispatchers.Main) {
+                        onProgress(0, allSources.size, "Waiting for the secure connection to become ready…")
+                    }
+                    Thread.sleep(1500)
+                }
+            }
+        }
     }
 
     // 16 worker groups × 8 long-lived URL slots = 128 independently scheduled URL jobs.

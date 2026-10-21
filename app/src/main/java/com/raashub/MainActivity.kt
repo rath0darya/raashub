@@ -662,21 +662,28 @@ private fun HubApp(sources: List<OnionEntry>) {
     val notificationPrefs = remember { context.getSharedPreferences("raashub_notification_prefs", android.content.Context.MODE_PRIVATE) }
     var showNotificationPrompt by remember { mutableStateOf(Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !notificationPrefs.getBoolean("prompt_shown", false)) }
     // A consistent glass palette across Android versions.
+    // RaaSHub brand palette: neon pink, ocean blue, and near-black.
     val scheme = if (darkMode) {
         darkColorScheme(
-            primary = Color(0xFF73E7F5), onPrimary = Color(0xFF00232A),
-            secondary = Color(0xFFC0A8FF), tertiary = Color(0xFF83E4B5),
-            background = Color(0xFF080D19), surface = Color(0xFF121B2D),
-            surfaceVariant = Color(0xFF202B40), onSurface = Color(0xFFEAF2FF),
-            onSurfaceVariant = Color(0xFF9EADC5), outline = Color(0xFF64748B)
+            primary = Color(0xFFFF2D95), onPrimary = Color(0xFF0A0A0A),
+            secondary = Color(0xFF007BA7), onSecondary = Color(0xFFFFFFFF),
+            tertiary = Color(0xFFFF2D95),
+            background = Color(0xFF0A0A0A), surface = Color(0xFF111114),
+            surfaceVariant = Color(0xFF19191E), onSurface = Color(0xFFFFFFFF),
+            onSurfaceVariant = Color(0xFFB8B8C2), outline = Color(0xFF007BA7),
+            primaryContainer = Color(0xFF351326), onPrimaryContainer = Color(0xFFFFFFFF),
+            secondaryContainer = Color(0xFF102832), onSecondaryContainer = Color(0xFFFFFFFF)
         )
     } else {
         lightColorScheme(
-            primary = Color(0xFF006A83), secondary = Color(0xFF6553A5),
-            tertiary = Color(0xFF167D67), background = Color(0xFFF1F5FC),
-            surface = Color(0xFFFFFFFF), surfaceVariant = Color(0xFFE4EAF5),
-            onSurface = Color(0xFF172033), onSurfaceVariant = Color(0xFF56647A),
-            outline = Color(0xFF8997AD)
+            primary = Color(0xFFFF2D95), onPrimary = Color(0xFF0A0A0A),
+            secondary = Color(0xFF007BA7), onSecondary = Color(0xFFFFFFFF),
+            tertiary = Color(0xFF007BA7), background = Color(0xFFF8F7FA),
+            surface = Color(0xFFFFFFFF), surfaceVariant = Color(0xFFF0EDF3),
+            onSurface = Color(0xFF0A0A0A), onSurfaceVariant = Color(0xFF45434A),
+            outline = Color(0xFF007BA7),
+            primaryContainer = Color(0xFFFFD8E9), onPrimaryContainer = Color(0xFF0A0A0A),
+            secondaryContainer = Color(0xFFD8F1FA), onSecondaryContainer = Color(0xFF0A0A0A)
         )
     }
     var tab by remember { mutableStateOf(Tab.HOME) }
@@ -784,8 +791,8 @@ private fun HubApp(sources: List<OnionEntry>) {
                 Modifier.fillMaxSize()
                     .background(Brush.linearGradient(listOf(
                         MaterialTheme.colorScheme.background,
-                        if (darkMode) Color(0xFF10192B) else Color(0xFFE8EEF9),
-                        if (darkMode) Color(0xFF17142B) else Color(0xFFF5F1FC)
+                        if (darkMode) Color(0xFF0A0A0A) else Color(0xFF0A0A0A),
+                        if (darkMode) Color(0xFF101018) else Color(0xFF101018)
                     )))
                     .padding(inset)
             ) {
@@ -864,7 +871,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
 private fun Metric(label: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier) {
     Card(modifier, shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
         Column(Modifier.padding(15.dp)) {
-            Icon(icon, null, tint = Color(0xFF18BFD2), modifier = Modifier.size(24.dp))
+            Icon(icon, null, tint = Color(0xFF007BA7), modifier = Modifier.size(24.dp))
             Spacer(Modifier.height(12.dp))
             Text(value, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
             Text(label, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -943,7 +950,7 @@ private fun SourceCard(group: OnionGroup, health: Map<String, HealthResult> = em
     Card(Modifier.fillMaxWidth().clickable(onClick = onClick), shape = RoundedCornerShape(17.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, latestColor.copy(alpha = .38f))) {
         Column(Modifier.fillMaxWidth()) {
             Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFF8B69E8).copy(alpha = .15f)) { Icon(Icons.Default.Language, null, Modifier.padding(9.dp), tint = Color(0xFF9B80FF)) }
+                Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFF007BA7).copy(alpha = .15f)) { Icon(Icons.Default.Language, null, Modifier.padding(9.dp), tint = Color(0xFFFF2D95)) }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(group.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1052,7 +1059,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
         item { Text("Health check results", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp) }
         item { Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Inventory2, null, tint = Color(0xFF16B8A6), modifier = Modifier.size(28.dp))
+                Icon(Icons.Default.Inventory2, null, tint = Color(0xFF007BA7), modifier = Modifier.size(28.dp))
                 Spacer(Modifier.width(12.dp))
                 Column { Text("Source index", fontWeight = FontWeight.SemiBold); Text("${sources.count { it.host.endsWith(".onion", true) }} onion URLs and ${sources.size - sources.count { it.host.endsWith(".onion", true) }} clear-web URLs in ${groups.size} groups", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
@@ -1062,7 +1069,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 val pulse = rememberInfiniteTransition(label = "monitoringPulse")
                 val rotation by pulse.animateFloat(initialValue = 0f, targetValue = if (checking) 360f else 0f, animationSpec = infiniteRepeatable(animation = tween(1800, easing = LinearEasing), repeatMode = RepeatMode.Restart), label = "monitoringRotation")
-                Icon(Icons.Default.PendingActions, null, tint = Color(0xFFB58AFF), modifier = Modifier.size(28.dp).rotate(rotation))
+                Icon(Icons.Default.PendingActions, null, tint = Color(0xFFFF2D95), modifier = Modifier.size(28.dp).rotate(rotation))
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Live monitoring", fontWeight = FontWeight.SemiBold)

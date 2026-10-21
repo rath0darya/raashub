@@ -35,9 +35,28 @@ def normalize_url(raw):
         value = "http://" + value
     try:
         parsed = urlsplit(value)
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        host = (parsed.hostname or "").lower()
+        # Reject malformed URL syntax before it reaches the app's source index.
+        if parsed.scheme.lower() not in {"http", "https"} or not host:
             return None
-    except ValueError:
+        if any(ch.isspace() or ord(ch) < 32 for ch in value):
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        if parsed.port is not None and not (1 <= parsed.port <= 65535):
+            return None
+        if host.endswith(".onion"):
+            # Only Tor v3 onion addresses are valid today; v2 addresses are obsolete.
+            label = host[:-len(".onion")]
+            if not re.fullmatch(r"[a-z2-7]{56}", label):
+                return None
+        elif not (host == "localhost" or re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.?", host)
+                  or re.fullmatch(r"(?:\\d{1,3}\\.){3}\\d{1,3}", host)
+                  or ":" in host):
+            return None
+        if parsed.scheme.lower() == "https" and parsed.port == 80:
+            pass
+    except (ValueError, UnicodeError):
         return None
     return value
 
@@ -85,10 +104,18 @@ def clean_file(path):
                 else:
                     link = dict(link)
                     link["url"] = normalized
-            key = url_key(normalized if normalized is not None else raw)
-            if key is None or key not in seen:
-                if key is not None:
-                    seen.add(key)
+            if normalized is None:
+                # Invalid URLs must never survive into the runtime directory.
+                urls_removed += 1
+                changed = True
+                continue
+            key = url_key(normalized)
+            if key is None:
+                urls_removed += 1
+                changed = True
+                continue
+            if key not in seen:
+                seen.add(key)
                 kept.append(link)
             else:
                 urls_removed += 1
@@ -115,4 +142,4 @@ if GROUPS.is_dir():
     for file_path in sorted(GROUPS.glob("*.json")):
         clean_file(file_path)
 
-print(f"Scanned {urls_seen} structured URL entries; removed {urls_removed} duplicates; changed {files_changed} files.")
+print(f"Scanned {urls_seen} structured URL entries; removed {urls_removed} invalid/duplicate URLs; changed {files_changed} files.")

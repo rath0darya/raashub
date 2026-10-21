@@ -51,7 +51,7 @@ def normalize_url(raw):
             if not re.fullmatch(r"[a-z2-7]{56}", label):
                 return None
         elif not (host == "localhost" or re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?", host)
-                  or re.fullmatch(r"(?:\\d{1,3}\.){3}\\d{1,3}", host)
+                  or re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host)
                   or ":" in host):
             return None
     except (ValueError, UnicodeError):

@@ -2,7 +2,7 @@
     <queries><package android:name="org.torproject.torbrowser" /></queries>
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <application android:allowBackup="false" android:label="RaaSHub" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:usesCleartextTraffic="false">
+    <application android:allowBackup="false" android:label="RaaSHub" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:theme="@style/Theme.RaaSHub" android:usesCleartextTraffic="false">
         <service android:name="org.torproject.jni.TorService" android:exported="false" />
         <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="unspecified" android:configChanges="uiMode">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>

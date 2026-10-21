@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
@@ -689,10 +690,24 @@ private fun HubApp(sources: List<OnionEntry>) {
     var darkMode by remember { mutableStateOf(themePrefs.getBoolean("dark_mode", true)) }
     val notificationPrefs = remember { context.getSharedPreferences("raashub_notification_prefs", android.content.Context.MODE_PRIVATE) }
     var showNotificationPrompt by remember { mutableStateOf(Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !notificationPrefs.getBoolean("prompt_shown", false)) }
-    val scheme = if (android.os.Build.VERSION.SDK_INT >= 31) {
-        if (darkMode) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-    } else if (darkMode) darkColorScheme(primary = Color(0xFF6CE8FF), secondary = Color(0xFFB39BFF), background = Color(0xFF0A1020), surface = Color(0xFF141D32))
-    else lightColorScheme(primary = Color(0xFF006A83), secondary = Color(0xFF6553A5))
+    // A consistent glass palette across Android versions.
+    val scheme = if (darkMode) {
+        darkColorScheme(
+            primary = Color(0xFF73E7F5), onPrimary = Color(0xFF00232A),
+            secondary = Color(0xFFC0A8FF), tertiary = Color(0xFF83E4B5),
+            background = Color(0xFF080D19), surface = Color(0xFF121B2D),
+            surfaceVariant = Color(0xFF202B40), onSurface = Color(0xFFEAF2FF),
+            onSurfaceVariant = Color(0xFF9EADC5), outline = Color(0xFF64748B)
+        )
+    } else {
+        lightColorScheme(
+            primary = Color(0xFF006A83), secondary = Color(0xFF6553A5),
+            tertiary = Color(0xFF167D67), background = Color(0xFFF1F5FC),
+            surface = Color(0xFFFFFFFF), surfaceVariant = Color(0xFFE4EAF5),
+            onSurface = Color(0xFF172033), onSurfaceVariant = Color(0xFF56647A),
+            outline = Color(0xFF8997AD)
+        )
+    }
     var tab by remember { mutableStateOf(Tab.HOME) }
     var search by remember { mutableStateOf("") }
     var sourceFilter by remember { mutableStateOf("all") }
@@ -778,11 +793,14 @@ private fun HubApp(sources: List<OnionEntry>) {
             )
         }
         Scaffold(
-            containerColor = MaterialTheme.colorScheme.background,
+            containerColor = Color.Transparent,
             bottomBar = {
                 Column {
                     Text("Developed With ♥️ AnonVox", Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    NavigationBar {
+                    NavigationBar(
+                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+                        tonalElevation = 0.dp
+                    ) {
                     Tab.entries.forEach { t ->
                         val icon = when (t) { Tab.HOME -> Icons.Default.Dashboard; Tab.SOURCES -> Icons.Default.Hub; Tab.ACTIVITY -> Icons.Default.Timeline; Tab.SETTINGS -> Icons.Default.Settings }
                         NavigationBarItem(selected = tab == t, onClick = { tab = t; selected = null }, icon = { Icon(icon, t.title) }, label = { Text(t.title) })
@@ -791,8 +809,20 @@ private fun HubApp(sources: List<OnionEntry>) {
                 }
             }
         ) { inset ->
-            Column(Modifier.fillMaxSize().padding(inset)) {
-                Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.tertiaryContainer))).padding(20.dp)) {
+            Column(
+                Modifier.fillMaxSize()
+                    .background(Brush.linearGradient(listOf(
+                        MaterialTheme.colorScheme.background,
+                        if (darkMode) Color(0xFF10192B) else Color(0xFFE8EEF9),
+                        if (darkMode) Color(0xFF17142B) else Color(0xFFF5F1FC)
+                    )))
+                    .padding(inset)
+            ) {
+                Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(
+                    MaterialTheme.colorScheme.primary.copy(alpha = if (darkMode) 0.20f else 0.12f),
+                    MaterialTheme.colorScheme.secondary.copy(alpha = if (darkMode) 0.18f else 0.10f),
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.30f)
+                ))).padding(20.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size((LocalConfiguration.current.screenWidthDp * 0.12f).coerceIn(40f, 54f).dp).clip(RoundedCornerShape(14.dp)).background(Color.Black), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
                         Spacer(Modifier.width(12.dp))
@@ -830,7 +860,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
             }
         }
         item {
-            Card(shape = RoundedCornerShape(22.dp)) {
+            Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
                 Column(Modifier.padding(18.dp)) {
                     Text("Intelligence snapshot", fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
@@ -861,7 +891,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
 
 @Composable
 private fun Metric(label: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier) {
-    Card(modifier, shape = RoundedCornerShape(20.dp)) {
+    Card(modifier, shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
         Column(Modifier.padding(15.dp)) {
             Icon(icon, null, tint = Color(0xFF18BFD2), modifier = Modifier.size(24.dp))
             Spacer(Modifier.height(12.dp))
@@ -940,7 +970,7 @@ private fun SourceCard(group: OnionGroup, health: Map<String, HealthResult> = em
     val groupResults = group.urls.mapNotNull { health[it] }
     val responses = groupResults.count { it.responseCode != null }
     val latestColor = groupResults.maxByOrNull { it.checkedAt }?.let { responseStatusColor(it) } ?: Color(0xFF8792A2)
-    Card(Modifier.fillMaxWidth().clickable(onClick = onClick), shape = RoundedCornerShape(17.dp), border = androidx.compose.foundation.BorderStroke(1.dp, latestColor.copy(alpha = .38f))) {
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick), shape = RoundedCornerShape(17.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.70f)), border = BorderStroke(1.dp, latestColor.copy(alpha = .38f))) {
         Column(Modifier.fillMaxWidth()) {
             Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFF8B69E8).copy(alpha = .15f)) { Icon(Icons.Default.Language, null, Modifier.padding(9.dp), tint = Color(0xFF9B80FF)) }
@@ -991,7 +1021,7 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
                 }
                 val statusColor = responseStatusColor(result)
                 val host = Uri.parse(entry.url).host ?: entry.url
-                Card(shape = RoundedCornerShape(18.dp)) {
+                Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(host, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                         Text(entry.url, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
@@ -1050,7 +1080,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("Activity", fontSize = 24.sp, fontWeight = FontWeight.Bold) }
         item { Text("Health check results", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp) }
-        item { Card(shape = RoundedCornerShape(18.dp)) {
+        item { Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Inventory2, null, tint = Color(0xFF16B8A6), modifier = Modifier.size(28.dp))
                 Spacer(Modifier.width(12.dp))
@@ -1058,7 +1088,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
             }
         }
         }
-        item { Card(shape = RoundedCornerShape(18.dp)) {
+        item { Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 val pulse = rememberInfiniteTransition(label = "monitoringPulse")
                 val rotation by pulse.animateFloat(initialValue = 0f, targetValue = if (checking) 360f else 0f, animationSpec = infiniteRepeatable(animation = tween(1800, easing = LinearEasing), repeatMode = RepeatMode.Restart), label = "monitoringRotation")
@@ -1091,7 +1121,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
         }
         if (checking || workers.isNotEmpty()) {
             item {
-                Card(shape = RoundedCornerShape(16.dp)) {
+                Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(if (checking) "Live workers" else "Last worker activity", fontWeight = FontWeight.SemiBold)
                         Text("${workers.count { it.status == "Checking" }} URL slots currently checking • ${workers.count { it.status == "Waiting" }} waiting", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1106,7 +1136,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                 }
             }
             item {
-                Card(shape = RoundedCornerShape(16.dp)) {
+                Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(if (checking) "Live activity log" else "Last scan activity log", fontWeight = FontWeight.SemiBold)
                         Text("Plain-text updates from the current scan", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1119,7 +1149,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
             items(3) { SkeletonSourceCard() }
         }
         groups.filter { group -> group.urls.any { report?.results?.containsKey(it) == true } }.forEach { group ->
-            item { Card(shape = RoundedCornerShape(14.dp)) {
+            item { Card(shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
                 Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(group.name, fontWeight = FontWeight.SemiBold)
                     group.entries.filter { report?.results?.containsKey(it.url) == true }.forEach { entry ->
@@ -1148,7 +1178,7 @@ private fun SkeletonSourceCard() {
         animationSpec = infiniteRepeatable(animation = tween(850, easing = LinearEasing), repeatMode = RepeatMode.Reverse),
         label = "skeletonAlpha"
     )
-    Card(shape = RoundedCornerShape(16.dp)) {
+    Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(Modifier.fillMaxWidth(0.58f).height(16.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)).graphicsLayer { this.alpha = alpha })
             Box(Modifier.fillMaxWidth(0.92f).height(11.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)).graphicsLayer { this.alpha = alpha })
@@ -1163,7 +1193,7 @@ private fun Settings(report: HealthReport?, sourceCount: Int, darkMode: Boolean,
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("Settings", fontSize = 26.sp, fontWeight = FontWeight.Bold) }
         item {
-            Card(shape = RoundedCornerShape(20.dp)) {
+            Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
                 Column(Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
@@ -1197,7 +1227,7 @@ private fun Settings(report: HealthReport?, sourceCount: Int, darkMode: Boolean,
             }
         }
         item {
-            Card(shape = RoundedCornerShape(20.dp)) {
+            Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Intelligence sources", fontWeight = FontWeight.Bold, fontSize = 17.sp)
                     StateLine("Indexed URLs", sourceCount.toString(), MaterialTheme.colorScheme.primary)
@@ -1207,7 +1237,7 @@ private fun Settings(report: HealthReport?, sourceCount: Int, darkMode: Boolean,
             }
         }
         item {
-            Card(shape = RoundedCornerShape(20.dp)) {
+            Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("About RaaSHub", fontWeight = FontWeight.Bold, fontSize = 17.sp)
                     Text("Cyber Threat Intelligence companion", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
@@ -58,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.json.JSONArray
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -164,7 +166,7 @@ private fun loadLatestHealthReport(context: android.content.Context): HealthRepo
         headersObject.keys().forEach { key -> headers[key] = headersObject.optString(key) }
         val code = if (item.isNull("responseCode")) null else item.optInt("responseCode")
         results[item.optString("url")] = HealthResult(
-            status = item.optString("status", "Unverified"), detail = item.optString("detail"),
+            status = if (item.optString("status", "Offline") == "Online") "Online" else "Offline", detail = if (item.optString("status", "Offline") == "Online") item.optString("detail") else "Offline",
             checkedAt = item.optLong("checkedAt"), responseCode = code,
             httpVersion = item.optString("httpVersion", "—"), finalUrl = item.optString("finalUrl"),
             title = item.optString("title"), contentType = item.optString("contentType"),
@@ -202,56 +204,32 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val allSources = sources.distinctBy { it.url.trim().lowercase() }
     if (allSources.isEmpty()) return HealthReport(false, null, "No URLs are available to check.", emptyMap())
 
+    // Classify first: clear-web and onion URLs must never share a connection path.
     val onionSources = allSources.filter { it.host.endsWith(".onion", ignoreCase = true) }
-    // Publish scan start immediately. Waiting for an entire Tor circuit here used to
-    // make the UI appear frozen for up to 90 seconds before any URL job began.
+    val clearWebSources = allSources.filterNot { it.host.endsWith(".onion", ignoreCase = true) }
+
     withContext(Dispatchers.Main) {
         onProgress(0, allSources.size)
         onWorkerUpdate(
-            listOf(WorkerProgress("Connection check", "Preparing", if (onionSources.isEmpty()) "Checking clear-web URLs directly" else "Checking that Tor can reach a test website")),
-            "Starting the scan. First, RaaSHub checks that the secure connection is actually working; URLs are not marked offline just because a request times out."
+            listOf(
+                WorkerProgress("Clear-web crawler", if (clearWebSources.isEmpty()) "No URLs" else "Starting direct checks", "Direct HTTP/HTTPS; no Tor"),
+                WorkerProgress("Onion crawler", if (onionSources.isEmpty()) "No URLs" else "Preparing Tor independently", "Tor SOCKS; onion URLs only")
+            ),
+            "Two independent crawlers started. Clear-web uses direct internet connections; .onion URLs use Tor only."
         )
     }
-    val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
-        // A listening SOCKS port is not proof that Tor has a working circuit.
-        // Starting 128 onion requests before circuit readiness can cause a wave of
-        // false timeouts. Wait for a small real connection test before launching work.
-        val listenerDeadline = System.currentTimeMillis() + 15000L
-        var port: Int? = null
-        while (port == null && System.currentTimeMillis() < listenerDeadline) {
-            port = findTorSocksProxy()
-            if (port == null) Thread.sleep(500)
-        }
-        if (port != null) {
-            val circuitDeadline = System.currentTimeMillis() + 45000L
-            var ready = false
-            while (!ready && System.currentTimeMillis() < circuitDeadline) {
-                ready = isTorCircuitReady(port)
-                if (!ready) Thread.sleep(1000)
-            }
-            if (ready) port else null
-        } else null
-    }
 
-    // 16 worker groups × 8 long-lived URL slots = 128 independently scheduled URL jobs.
-    // A shared queue means a slow URL occupies only its own slot; it does not block a batch.
-    // Each URL also probes HTTP and HTTPS concurrently, so use a bounded dispatcher that can
-    // run both blocking socket probes for all URL slots without Dispatchers.IO's default cap.
-    val workerCount = 16
-    val urlsPerWorker = 8
-    val maxConcurrentUrls = workerCount * urlsPerWorker
-    val maxConcurrentProbes = maxConcurrentUrls * 2
-    val networkDispatcher = Dispatchers.IO.limitedParallelism(maxConcurrentProbes)
-    val queue = Channel<OnionEntry>(Channel.UNLIMITED)
-    allSources.forEach { queue.trySend(it).getOrThrow() }
-    queue.close()
-
+    // Keep the total cap at 128 concurrent URL jobs and 256 HTTP/HTTPS probes.
+    // Each crawler has its own queue and 64 slots, so Tor startup cannot hold up clear-web checks.
+    val slotsPerCrawler = 64
+    val networkDispatcher = Dispatchers.IO.limitedParallelism(256)
     val completed = AtomicInteger(0)
     val activeUrls = AtomicInteger(0)
     val peakActiveUrls = AtomicInteger(0)
     val results = java.util.concurrent.ConcurrentHashMap<String, HealthResult>()
     val liveWorkers = java.util.concurrent.ConcurrentHashMap<String, WorkerProgress>()
     val liveLog = java.util.concurrent.CopyOnWriteArrayList<String>()
+
     suspend fun publishWorker(id: String, status: String, url: String = "", log: String) {
         liveWorkers[id] = WorkerProgress(id, status, url)
         liveLog.add("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}  $log")
@@ -259,48 +237,94 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         val snapshot = liveWorkers.values.sortedBy { it.id }
         withContext(Dispatchers.Main) { onWorkerUpdate(snapshot, liveLog.joinToString("\n")) }
     }
-    kotlinx.coroutines.coroutineScope {
-        val workerGroups = (0 until workerCount).map { groupIndex ->
-            launch {
-                val slots = (0 until urlsPerWorker).map { slotIndex ->
-                    launch {
-                        val workerId = "Worker ${groupIndex + 1} · Slot ${slotIndex + 1}"
-                        publishWorker(workerId, "Waiting", log = "$workerId ready; waiting for a URL")
-                        for (entry in queue) {
-                            val active = activeUrls.incrementAndGet()
-                            peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
-                            publishWorker(workerId, "Checking", entry.url, "$workerId checking ${entry.url}")
-                            try {
-                                val result = try {
-                                    checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
-                                } catch (e: Exception) {
-                                    val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
-                                    HealthResult("Unverified", reason, System.currentTimeMillis(), finalUrl = entry.url, error = reason)
-                                }
-                                results[entry.url] = result
-                                publishWorker(workerId, result.status, entry.url, "$workerId finished: ${result.status} — ${result.detail}")
-                            } finally {
-                                activeUrls.decrementAndGet()
-                                val done = completed.incrementAndGet()
-                                withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
+
+    suspend fun runCrawler(
+        crawlerName: String,
+        entries: List<OnionEntry>,
+        slotCount: Int,
+        proxyPort: Int?
+    ) {
+        if (entries.isEmpty()) {
+            publishWorker(crawlerName, "Idle", log = "$crawlerName has no URLs assigned")
+            return
+        }
+        val queue = Channel<OnionEntry>(Channel.UNLIMITED)
+        entries.forEach { queue.trySend(it).getOrThrow() }
+        queue.close()
+
+        coroutineScope {
+            val slots = (0 until slotCount).map { slotIndex ->
+                launch {
+                    val workerId = "$crawlerName · Slot ${slotIndex + 1}"
+                    publishWorker(workerId, "Waiting", log = "$workerId ready")
+                    for (entry in queue) {
+                        val active = activeUrls.incrementAndGet()
+                        peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
+                        publishWorker(workerId, "Checking", entry.url, "$workerId checking ${entry.url}")
+                        try {
+                            val result = try {
+                                checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
+                            } catch (_: Exception) {
+                                HealthResult("Offline", "Offline", System.currentTimeMillis(), finalUrl = entry.url, error = "")
                             }
+                            results[entry.url] = result
+                            publishWorker(workerId, result.status, entry.url, "$workerId finished: ${result.status} — ${result.detail}")
+                        } finally {
+                            activeUrls.decrementAndGet()
+                            val done = completed.incrementAndGet()
+                            withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
                         }
                     }
                 }
-                slots.joinAll()
             }
+            slots.joinAll()
         }
-        workerGroups.joinAll()
+    }
+
+    var onionProxyPort: Int? = null
+    kotlinx.coroutines.coroutineScope {
+        // This job starts immediately and uses direct sockets for non-onion hosts.
+        val clearWebJob = launch {
+            runCrawler("Clear-web crawler", clearWebSources, slotsPerCrawler, null)
+        }
+
+        // Tor discovery/circuit readiness runs only for onion URLs and never gates clear-web.
+        val onionJob = launch {
+            val proxyPort = if (onionSources.isEmpty()) null else withContext(Dispatchers.IO) {
+                // A public exit-test host may be blocked even while onion routing works.
+                // Only require the local SOCKS listener; let Tor establish the onion circuit.
+                val listenerDeadline = System.currentTimeMillis() + 30000L
+                var port: Int? = null
+                while (port == null && System.currentTimeMillis() < listenerDeadline) {
+                    port = findTorSocksProxy()
+                    if (port == null) kotlinx.coroutines.delay(500)
+                }
+                if (port != null) kotlinx.coroutines.delay(2500)
+                port
+            }
+            onionProxyPort = proxyPort
+            publishWorker(
+                "Onion crawler"            publishWorker(
+                "Onion crawler",
+                if (proxyPort == null && onionSources.isNotEmpty()) "Tor unavailable" else "Tor ready",
+                if (proxyPort == null) "No Tor route; clear-web continues independently" else "SOCKS port $proxyPort",
+                log = if (proxyPort == null && onionSources.isNotEmpty())
+                    "No Tor SOCKS listener was found; onion results will show Offline. Clear-web crawler is not affected."
+                else "Tor SOCKS listener found; onion-only crawler starting."
+            )
+            runCrawler("Onion crawler", onionSources, slotsPerCrawler, proxyPort)
+            runCrawler("Onion crawler", onionSources, slotsPerCrawler, proxyPort)
+        }
+
+        clearWebJob.join()
+        onionJob.join()
     }
 
     val finalResults = results.toMap()
-    val responses = finalResults.values.count { it.responseCode != null }
-    val timedOut = finalResults.values.count { it.error.contains("Timed out", ignoreCase = true) }
     val online = finalResults.values.count { it.status == "Online" }
-    val unverified = finalResults.values.count { it.status == "Unverified" }
-    return HealthReport(proxyPort != null || onionSources.isEmpty(), proxyPort,
-        "Processed ${finalResults.size}/${allSources.size} URLs. Worker pool: 16 groups × 8 concurrent URL slots (limit 128); HTTP/HTTPS probes run independently (limit 256 probes). Peak active URL jobs observed: ${peakActiveUrls.get()}. $online online; $responses returned HTTP responses; $timedOut timed out; $unverified unverified. Onion URLs are unverified if Tor is unavailable; a timeout is not proof a site is down.",
-        finalResults)
+    val offline = finalResults.size - online
+    val message = "Processed ${finalResults.size}/${allSources.size} URLs. Separate crawlers: ${clearWebSources.size} clear-web URLs checked directly; ${onionSources.size} onion URLs checked through Tor only. Concurrency: up to 64 direct + 64 Tor URL jobs, with HTTP/HTTPS probes capped at 256. Peak active URL jobs: ${peakActiveUrls.get()}. $online online; $offline offline. Offline means no HTTP response was received during this check."
+    return HealthReport(onionSources.isEmpty() || onionProxyPort != null, onionProxyPort, message, finalResults)
 }
 private fun isTorCircuitReady(proxyPort: Int): Boolean {
     return try {
@@ -386,24 +410,16 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
         if (scheme == "https") primary.responseCode?.let { "HTTP $it" } ?: primary.error.ifBlank { primary.status }
         else alternateResult.responseCode?.let { "HTTP $it" } ?: alternateResult.error.ifBlank { alternateResult.status }
     val reachable = candidates.filter { it.responseCode != null }
-    val summary = candidates.joinToString("; ") { result ->
+    val summary = if (reachable.isEmpty()) "Offline" else candidates.joinToString("; ") { result ->
         val isHttps = Uri.parse(result.finalUrl.ifBlank { urlText }).scheme.equals("https", true)
-        "${if (isHttps) "HTTPS" else "HTTP"}: ${result.responseCode?.let { "HTTP $it" } ?: result.error.ifBlank { result.status }}"
+        "${if (isHttps) "HTTPS" else "HTTP"}: ${result.responseCode?.let { "HTTP $it" } ?: "No response"}"
     }
     return selected.copy(
-        detail = summary,
+        detail = if (reachable.isEmpty()) "Offline" else summary,
         finalUrl = selected.finalUrl.ifBlank { primaryUrl },
         headers = combinedHeaders,
-        status = when {
-            reachable.any { it.responseCode?.let { code -> code in 200..299 } == true } -> "Online"
-            reachable.any { it.responseCode?.let { code -> code in 300..399 } == true } -> "Redirect"
-            reachable.any { it.responseCode?.let { code -> code in 400..499 } == true } -> "Client error"
-            reachable.any { it.responseCode?.let { code -> code in 500..599 } == true } -> "Server error"
-            reachable.any { it.responseCode?.let { code -> code in 100..199 } == true } -> "Informational"
-            reachable.any { it.responseCode != null } -> "HTTP response"
-            else -> "Unverified"
-        },
-        error = if (reachable.isEmpty()) listOf(primary.error, alternateResult.error).filter { it.isNotBlank() }.distinct().joinToString(" | ") else ""
+        status = if (reachable.any { it.responseCode != null }) "Online" else "Offline",
+        error = ""
     )
 }
 
@@ -478,14 +494,7 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
                 val contentType = headers["content-type"].orEmpty()
                 val server = headers["server"].orEmpty()
                 val detail = "HTTP $code • ${if (code in 200..399) "responded" else "server responded"}"
-                val status = when (code) {
-                    in 100..199 -> "Informational"
-                    in 200..299 -> "Online"
-                    in 300..399 -> "Redirect"
-                    in 400..499 -> "Client error"
-                    in 500..599 -> "Server error"
-                    else -> "Unverified"
-                }
+                val status = "Online"
                 HealthResult(
                     status = status, detail = detail, checkedAt = checkedAt, responseCode = code,
                     httpVersion = httpVersion, finalUrl = urlText, title = title,
@@ -496,13 +505,7 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
             }
         } finally { runCatching { raw.close() } }
     } catch (e: Exception) {
-        val reason = when (e) {
-            is java.net.SocketTimeoutException -> if (isOnion) "Timed out through Tor; the site may still be online" else "Timed out waiting for the website response; the site may still be online"
-            is javax.net.ssl.SSLException -> "Secure HTTPS connection failed"
-            is java.net.ConnectException -> if (isOnion) "Could not connect through Tor; the site may still be online" else "Could not connect to the website; the site may still be online"
-            else -> e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
-        }
-        HealthResult("Unverified", reason, checkedAt, finalUrl = urlText, error = reason)
+        HealthResult("Offline", "Offline", checkedAt, finalUrl = urlText, error = "")
     }
 }
 
@@ -660,10 +663,24 @@ private fun HubApp(sources: List<OnionEntry>) {
     var darkMode by remember { mutableStateOf(themePrefs.getBoolean("dark_mode", true)) }
     val notificationPrefs = remember { context.getSharedPreferences("raashub_notification_prefs", android.content.Context.MODE_PRIVATE) }
     var showNotificationPrompt by remember { mutableStateOf(Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !notificationPrefs.getBoolean("prompt_shown", false)) }
-    val scheme = if (android.os.Build.VERSION.SDK_INT >= 31) {
-        if (darkMode) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-    } else if (darkMode) darkColorScheme(primary = Color(0xFF6CE8FF), secondary = Color(0xFFB39BFF), background = Color(0xFF0A1020), surface = Color(0xFF141D32))
-    else lightColorScheme(primary = Color(0xFF006A83), secondary = Color(0xFF6553A5))
+    // A consistent glass palette across Android versions.
+    val scheme = if (darkMode) {
+        darkColorScheme(
+            primary = Color(0xFF73E7F5), onPrimary = Color(0xFF00232A),
+            secondary = Color(0xFFC0A8FF), tertiary = Color(0xFF83E4B5),
+            background = Color(0xFF080D19), surface = Color(0xFF121B2D),
+            surfaceVariant = Color(0xFF202B40), onSurface = Color(0xFFEAF2FF),
+            onSurfaceVariant = Color(0xFF9EADC5), outline = Color(0xFF64748B)
+        )
+    } else {
+        lightColorScheme(
+            primary = Color(0xFF006A83), secondary = Color(0xFF6553A5),
+            tertiary = Color(0xFF167D67), background = Color(0xFFF1F5FC),
+            surface = Color(0xFFFFFFFF), surfaceVariant = Color(0xFFE4EAF5),
+            onSurface = Color(0xFF172033), onSurfaceVariant = Color(0xFF56647A),
+            outline = Color(0xFF8997AD)
+        )
+    }
     var tab by remember { mutableStateOf(Tab.HOME) }
     var search by remember { mutableStateOf("") }
     var sourceFilter by remember { mutableStateOf("all") }
@@ -749,11 +766,14 @@ private fun HubApp(sources: List<OnionEntry>) {
             )
         }
         Scaffold(
-            containerColor = MaterialTheme.colorScheme.background,
+            containerColor = Color.Transparent,
             bottomBar = {
                 Column {
                     Text("Developed With ♥️ AnonVox", Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    NavigationBar {
+                    NavigationBar(
+                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.64f),
+                        tonalElevation = 0.dp
+                    ) {
                     Tab.entries.forEach { t ->
                         val icon = when (t) { Tab.HOME -> Icons.Default.Dashboard; Tab.SOURCES -> Icons.Default.Hub; Tab.ACTIVITY -> Icons.Default.Timeline; Tab.SETTINGS -> Icons.Default.Settings }
                         NavigationBarItem(selected = tab == t, onClick = { tab = t; selected = null }, icon = { Icon(icon, t.title) }, label = { Text(t.title) })
@@ -762,8 +782,20 @@ private fun HubApp(sources: List<OnionEntry>) {
                 }
             }
         ) { inset ->
-            Column(Modifier.fillMaxSize().padding(inset)) {
-                Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.tertiaryContainer))).padding(20.dp)) {
+            Column(
+                Modifier.fillMaxSize()
+                    .background(Brush.linearGradient(listOf(
+                        MaterialTheme.colorScheme.background,
+                        if (darkMode) Color(0xFF10192B) else Color(0xFFE8EEF9),
+                        if (darkMode) Color(0xFF17142B) else Color(0xFFF5F1FC)
+                    )))
+                    .padding(inset)
+            ) {
+                Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(
+                    MaterialTheme.colorScheme.primary.copy(alpha = if (darkMode) 0.20f else 0.12f),
+                    MaterialTheme.colorScheme.secondary.copy(alpha = if (darkMode) 0.18f else 0.10f),
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.30f)
+                ))).padding(20.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size((LocalConfiguration.current.screenWidthDp * 0.12f).coerceIn(40f, 54f).dp).clip(RoundedCornerShape(14.dp)).background(Color.Black), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
                         Spacer(Modifier.width(12.dp))
@@ -801,7 +833,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
             }
         }
         item {
-            Card(shape = RoundedCornerShape(22.dp)) {
+            Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
                 Column(Modifier.padding(18.dp)) {
                     Text("Intelligence snapshot", fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
@@ -818,7 +850,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
             }
         }
         item {
-            Card(Modifier.fillMaxWidth().clickable(onClick = onExplore), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+            Card(Modifier.fillMaxWidth().clickable(onClick = onExplore), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.56f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.30f))) {
                 Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) { Text("Explore sources", fontWeight = FontWeight.Bold); Text("Browse groups, markets and their onion/clear-web URLs.", fontSize = 12.sp) }
                     Icon(Icons.Default.ArrowForward, null)
@@ -832,7 +864,7 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
 
 @Composable
 private fun Metric(label: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier) {
-    Card(modifier, shape = RoundedCornerShape(20.dp)) {
+    Card(modifier, shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
         Column(Modifier.padding(15.dp)) {
             Icon(icon, null, tint = Color(0xFF18BFD2), modifier = Modifier.size(24.dp))
             Spacer(Modifier.height(12.dp))
@@ -911,7 +943,7 @@ private fun SourceCard(group: OnionGroup, health: Map<String, HealthResult> = em
     val groupResults = group.urls.mapNotNull { health[it] }
     val responses = groupResults.count { it.responseCode != null }
     val latestColor = groupResults.maxByOrNull { it.checkedAt }?.let { responseStatusColor(it) } ?: Color(0xFF8792A2)
-    Card(Modifier.fillMaxWidth().clickable(onClick = onClick), shape = RoundedCornerShape(17.dp), border = androidx.compose.foundation.BorderStroke(1.dp, latestColor.copy(alpha = .38f))) {
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick), shape = RoundedCornerShape(17.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, latestColor.copy(alpha = .38f))) {
         Column(Modifier.fillMaxWidth()) {
             Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFF8B69E8).copy(alpha = .15f)) { Icon(Icons.Default.Language, null, Modifier.padding(9.dp), tint = Color(0xFF9B80FF)) }
@@ -926,7 +958,7 @@ private fun SourceCard(group: OnionGroup, health: Map<String, HealthResult> = em
                             Surface(shape = RoundedCornerShape(8.dp), color = latestColor.copy(alpha = .14f)) {
                                 Text("$responses/${group.urls.size} responded", modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = latestColor, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                             }
-                            groupResults.groupBy { it.responseCode?.let { code -> (code / 100).toString() + "xx" } ?: if (it.error.contains("Timed out", true)) "Timeout" else "No response" }
+                            groupResults.groupBy { if (it.status == "Online") "Online" else "Offline" }
                                 .entries.sortedBy { it.key }.take(4).forEach { (kind, entries) ->
                                     Text("$kind ${entries.size}", fontSize = 10.sp, color = responseStatusColor(entries.firstOrNull()))
                                 }
@@ -957,12 +989,12 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
                     "Client error" -> "4xx • Client error"
                     "Server error" -> "5xx • Server error"
                     "Informational" -> "1xx • Informational"
-                    "Unverified" -> "Unverified / no response"
+                    "Offline" -> "Offline"
                     else -> "Not checked"
                 }
                 val statusColor = responseStatusColor(result)
                 val host = Uri.parse(entry.url).host ?: entry.url
-                Card(shape = RoundedCornerShape(18.dp)) {
+                Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(host, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                         Text(entry.url, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
@@ -1021,7 +1053,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("Activity", fontSize = 24.sp, fontWeight = FontWeight.Bold) }
         item { Text("Health check results", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp) }
-        item { Card(shape = RoundedCornerShape(18.dp)) {
+        item { Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Inventory2, null, tint = Color(0xFF16B8A6), modifier = Modifier.size(28.dp))
                 Spacer(Modifier.width(12.dp))
@@ -1029,7 +1061,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
             }
         }
         }
-        item { Card(shape = RoundedCornerShape(18.dp)) {
+        item { Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 val pulse = rememberInfiniteTransition(label = "monitoringPulse")
                 val rotation by pulse.animateFloat(initialValue = 0f, targetValue = if (checking) 360f else 0f, animationSpec = infiniteRepeatable(animation = tween(1800, easing = LinearEasing), repeatMode = RepeatMode.Restart), label = "monitoringRotation")
@@ -1062,7 +1094,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
         }
         if (checking || workers.isNotEmpty()) {
             item {
-                Card(shape = RoundedCornerShape(16.dp)) {
+                Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(if (checking) "Live workers" else "Last worker activity", fontWeight = FontWeight.SemiBold)
                         Text("${workers.count { it.status == "Checking" }} URL slots currently checking • ${workers.count { it.status == "Waiting" }} waiting", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1077,7 +1109,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                 }
             }
             item {
-                Card(shape = RoundedCornerShape(16.dp)) {
+                Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(if (checking) "Live activity log" else "Last scan activity log", fontWeight = FontWeight.SemiBold)
                         Text("Plain-text updates from the current scan", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1090,7 +1122,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
             items(3) { SkeletonSourceCard() }
         }
         groups.filter { group -> group.urls.any { report?.results?.containsKey(it) == true } }.forEach { group ->
-            item { Card(shape = RoundedCornerShape(14.dp)) {
+            item { Card(shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
                 Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(group.name, fontWeight = FontWeight.SemiBold)
                     group.entries.filter { report?.results?.containsKey(it.url) == true }.forEach { entry ->
@@ -1119,7 +1151,7 @@ private fun SkeletonSourceCard() {
         animationSpec = infiniteRepeatable(animation = tween(850, easing = LinearEasing), repeatMode = RepeatMode.Reverse),
         label = "skeletonAlpha"
     )
-    Card(shape = RoundedCornerShape(16.dp)) {
+    Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(Modifier.fillMaxWidth(0.58f).height(16.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)).graphicsLayer { this.alpha = alpha })
             Box(Modifier.fillMaxWidth(0.92f).height(11.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)).graphicsLayer { this.alpha = alpha })
@@ -1134,7 +1166,7 @@ private fun Settings(report: HealthReport?, sourceCount: Int, darkMode: Boolean,
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("Settings", fontSize = 26.sp, fontWeight = FontWeight.Bold) }
         item {
-            Card(shape = RoundedCornerShape(20.dp)) {
+            Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
                 Column(Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
@@ -1168,7 +1200,7 @@ private fun Settings(report: HealthReport?, sourceCount: Int, darkMode: Boolean,
             }
         }
         item {
-            Card(shape = RoundedCornerShape(20.dp)) {
+            Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Intelligence sources", fontWeight = FontWeight.Bold, fontSize = 17.sp)
                     StateLine("Indexed URLs", sourceCount.toString(), MaterialTheme.colorScheme.primary)
@@ -1178,7 +1210,7 @@ private fun Settings(report: HealthReport?, sourceCount: Int, darkMode: Boolean,
             }
         }
         item {
-            Card(shape = RoundedCornerShape(20.dp)) {
+            Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("About RaaSHub", fontWeight = FontWeight.Bold, fontSize = 17.sp)
                     Text("Cyber Threat Intelligence companion", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -304,7 +304,6 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
             }
             onionProxyPort = proxyPort
             publishWorker(
-                "Onion crawler"            publishWorker(
                 "Onion crawler",
                 if (proxyPort == null && onionSources.isNotEmpty()) "Tor unavailable" else "Tor ready",
                 if (proxyPort == null) "No Tor route; clear-web continues independently" else "SOCKS port $proxyPort",
@@ -312,7 +311,6 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                     "No Tor SOCKS listener was found; onion results will show Offline. Clear-web crawler is not affected."
                 else "Tor SOCKS listener found; onion-only crawler starting."
             )
-            runCrawler("Onion crawler", onionSources, slotsPerCrawler, proxyPort)
             runCrawler("Onion crawler", onionSources, slotsPerCrawler, proxyPort)
         }
 
@@ -380,7 +378,7 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
     val primaryUrl = uri.buildUpon().scheme(scheme).build().toString()
     val alternateUrl = uri.buildUpon().scheme(alternate).build().toString()
 
-    // Give each protocol enough time for a slow Tor circuit, without multi-minute retry chains. A timeout means "unverified", not "offline".
+    // Check both protocols concurrently. The final user-facing result is always Online or Offline.
     // Keep HTTP and HTTPS parallel so a broken scheme does not block the other.
     fun probe(url: String): HealthResult = checkOneOnionAttempt(url, proxyPort, 20000)
 
@@ -934,7 +932,6 @@ private fun responseStatusColor(result: HealthResult?): Color = when {
     result.responseCode?.let { it in 300..399 } == true -> Color(0xFF8B7CFF)
     result.responseCode?.let { it in 400..499 } == true -> Color(0xFFFFB547)
     result.responseCode?.let { it in 500..599 } == true -> Color(0xFFFF5D67)
-    result.error.contains("Timed out", true) -> Color(0xFFFF8A4C)
     else -> Color(0xFF8792A2)
 }
 

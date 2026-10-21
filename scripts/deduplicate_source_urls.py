@@ -50,12 +50,10 @@ def normalize_url(raw):
             label = host[:-len(".onion")]
             if not re.fullmatch(r"[a-z2-7]{56}", label):
                 return None
-        elif not (host == "localhost" or re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.?", host)
-                  or re.fullmatch(r"(?:\\d{1,3}\\.){3}\\d{1,3}", host)
+        elif not (host == "localhost" or re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?", host)
+                  or re.fullmatch(r"(?:\\d{1,3}\.){3}\\d{1,3}", host)
                   or ":" in host):
             return None
-        if parsed.scheme.lower() == "https" and parsed.port == 80:
-            pass
     except (ValueError, UnicodeError):
         return None
     return value

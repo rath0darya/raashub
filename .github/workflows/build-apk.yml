@@ -1,0 +1,59 @@
+name: Build RaaSHub APK
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'Download/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: raashub-main-apk
+  cancel-in-progress: false
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Copy APK into repository Download directory
+        run: |
+          mkdir -p Download
+          cp app/build/outputs/apk/debug/app-debug.apk Download/RaaSHub.apk
+
+      - name: Commit APK directly to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Download/RaaSHub.apk
+          if git diff --cached --quiet; then
+            echo "APK unchanged; nothing to commit."
+            exit 0
+          fi
+          git commit -m "Build RaaSHub APK [skip ci]"
+          git push origin HEAD:main

@@ -706,12 +706,12 @@ private fun HubApp(sources: List<OnionEntry>) {
         lightColorScheme(
             primary = Color(0xFFFF2D95), onPrimary = Color(0xFF0A0A0A),
             secondary = Color(0xFF007BA7), onSecondary = Color(0xFFFFFFFF),
-            tertiary = Color(0xFF007BA7), background = Color(0xFF0A0A0A),
-            surface = Color(0xFF111114), surfaceVariant = Color(0xFF19191E),
-            onSurface = Color(0xFFFFFFFF), onSurfaceVariant = Color(0xFFB8B8C2),
+            tertiary = Color(0xFF007BA7), background = Color(0xFFF8F7FA),
+            surface = Color(0xFFFFFFFF), surfaceVariant = Color(0xFFF0EDF3),
+            onSurface = Color(0xFF0A0A0A), onSurfaceVariant = Color(0xFF45434A),
             outline = Color(0xFF007BA7),
-            primaryContainer = Color(0xFF351326), onPrimaryContainer = Color(0xFFFFFFFF),
-            secondaryContainer = Color(0xFF102832), onSecondaryContainer = Color(0xFFFFFFFF)
+            primaryContainer = Color(0xFFFFD8E9), onPrimaryContainer = Color(0xFF0A0A0A),
+            secondaryContainer = Color(0xFFD8F1FA), onSecondaryContainer = Color(0xFF0A0A0A)
         )
     }
     var tab by remember { mutableStateOf(Tab.HOME) }

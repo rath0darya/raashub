@@ -668,6 +668,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    fun openExactAlarmSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val intent = Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+            .setData(Uri.parse("package:$packageName"))
+        runCatching { startActivity(intent) }.onFailure {
+            runCatching { startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
+        }
+    }
+
     fun showMonitoringNotification(completed: Int, total: Int, finished: Boolean, message: String = "") {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         val title = if (finished) "Live monitoring completed" else "RaaSHub live monitoring"
@@ -954,7 +963,8 @@ private fun HubApp(sources: List<OnionEntry>) {
                         healthReport, sources.size, darkMode,
                         { enabled -> darkMode = enabled; themePrefs.edit().putBoolean("dark_mode", enabled).apply() },
                         onNotificationSettings = { (context as? MainActivity)?.openNotificationSettings() },
-                        onBackgroundSettings = { (context as? MainActivity)?.openBackgroundSettings() }
+                        onBackgroundSettings = { (context as? MainActivity)?.openBackgroundSettings() },
+                        onScheduleSettings = { (context as? MainActivity)?.openExactAlarmSettings() }
                     ) 
                 }
             }
@@ -1311,7 +1321,8 @@ private fun Settings(
     report: HealthReport?, sourceCount: Int, darkMode: Boolean,
     onDarkModeChange: (Boolean) -> Unit,
     onNotificationSettings: () -> Unit,
-    onBackgroundSettings: () -> Unit
+    onBackgroundSettings: () -> Unit,
+    onScheduleSettings: () -> Unit
 ) {
     val context = LocalContext.current
     val backgroundAllowed = remember {
@@ -1368,6 +1379,17 @@ private fun Settings(
                             Text(if (backgroundAllowed) "Unrestricted battery use is allowed." else "Battery optimization may pause long-running scans. Enable unrestricted use in Android settings.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         TextButton(onClick = onBackgroundSettings) { Text(if (backgroundAllowed) "Manage" else "Enable") }
+                    }
+                    HorizontalDivider(Modifier.padding(vertical = 14.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Schedule, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(26.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Exact scan schedule", fontWeight = FontWeight.SemiBold)
+                            val exactAllowed = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || context.getSystemService(android.app.AlarmManager::class.java).canScheduleExactAlarms()
+                            Text(if (exactAllowed) "Android exact-alarm access is available." else "Allow exact alarms for the closest 05:00 and 17:00 IST timing. Otherwise Android may defer scans.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(onClick = onScheduleSettings) { Text("Manage") }
                     }
                     HorizontalDivider(Modifier.padding(vertical = 14.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {

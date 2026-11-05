@@ -30,7 +30,7 @@ def normalize_url(raw):
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return None
     host = parsed.hostname.lower()
-    if host.endswith(".onion") and not re.fullmatch(r"[a-z2-7]{56}\\.onion", host):
+    if host.endswith(".onion") and not re.fullmatch(r"[a-z2-7]{56}\.onion", host):
         return None
     if any(ch.isspace() or ord(ch) < 32 for ch in raw):
         return None

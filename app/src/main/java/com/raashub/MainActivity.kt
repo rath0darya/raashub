@@ -12,6 +12,7 @@ import android.graphics.BitmapFactory
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.PowerManager
 import android.widget.Toast
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
@@ -646,6 +647,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    fun isBackgroundUnrestricted(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+
+    fun requestBackgroundUnrestricted() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || isBackgroundUnrestricted()) return
+        val request = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            .setData(Uri.parse("package:$packageName"))
+        runCatching { startActivity(request) }.onFailure { openBackgroundSettings() }
+    }
+
+    fun openBackgroundSettings() {
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+            Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        else Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+        runCatching { startActivity(intent) }.onFailure {
+            runCatching { startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
+        }
+    }
+
     fun showMonitoringNotification(completed: Int, total: Int, finished: Boolean, message: String = "") {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         val title = if (finished) "Live monitoring completed" else "RaaSHub live monitoring"
@@ -746,7 +767,13 @@ private fun HubApp(sources: List<OnionEntry>) {
     val themePrefs = remember { context.getSharedPreferences("raashub_appearance_prefs", android.content.Context.MODE_PRIVATE) }
     var darkMode by remember { mutableStateOf(themePrefs.getBoolean("dark_mode", true)) }
     val notificationPrefs = remember { context.getSharedPreferences("raashub_notification_prefs", android.content.Context.MODE_PRIVATE) }
-    var showNotificationPrompt by remember { mutableStateOf(Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !notificationPrefs.getBoolean("prompt_shown", false)) }
+    val powerManager = remember { context.getSystemService(PowerManager::class.java) }
+    val backgroundPrefs = remember { context.getSharedPreferences("raashub_background_prefs", android.content.Context.MODE_PRIVATE) }
+    var showSetupPrompt by remember { mutableStateOf(
+        !backgroundPrefs.getBoolean("setup_prompt_handled", false) &&
+            ((Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) ||
+                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !powerManager.isIgnoringBatteryOptimizations(context.packageName)))
+    ) }
     // RaaSHub palette is intentionally limited to pink, blue and near-black.
     // Keep text high-contrast; use solid card surfaces so theme alpha never
     // blends text/cards with the page background and makes labels unreadable.
@@ -810,9 +837,20 @@ private fun HubApp(sources: List<OnionEntry>) {
                 progressTotal = intent.getIntExtra("total", progressTotal)
                 checking = intent.getBooleanExtra("running", false)
                 activityLog = intent.getStringExtra("log") ?: activityLog
-                if (!checking) {
+                val workersJson = intent.getStringExtra("workers")
+                if (!workersJson.isNullOrBlank()) {
+                    workerProgress = runCatching {
+                        val array = JSONArray(workersJson)
+                        buildList {
+                            for (i in 0 until array.length()) {
+                                val item = array.optJSONObject(i) ?: continue
+                                add(WorkerProgress(item.optString("id"), item.optString("status"), item.optString("url")))
+                            }
+                        }
+                    }.getOrDefault(workerProgress)
+                }
+                if (intent.getBooleanExtra("reportUpdated", false) || !checking) {
                     healthReport = loadLatestHealthReport(context)
-                    workerProgress = emptyList()
                 }
             }
         }
@@ -828,27 +866,34 @@ private fun HubApp(sources: List<OnionEntry>) {
         }
     }
     MaterialTheme(colorScheme = scheme) {
-        if (showNotificationPrompt) {
+        if (showSetupPrompt) {
             AlertDialog(
                 onDismissRequest = {
-                    showNotificationPrompt = false
-                    notificationPrefs.edit().putBoolean("prompt_shown", true).apply()
+                    showSetupPrompt = false
+                    backgroundPrefs.edit().putBoolean("setup_prompt_handled", true).apply()
                 },
-                icon = { Icon(Icons.Default.NotificationsActive, null, tint = MaterialTheme.colorScheme.primary) },
-                title = { Text("Enable RaaSHub notifications?") },
-                text = { Text("Allow notifications to see live-monitoring progress, percentage updates, and when checks finish. Android will show its permission dialog next.") },
+                icon = { Icon(Icons.Default.BatteryChargingFull, null, tint = MaterialTheme.colorScheme.primary) },
+                title = { Text("Set up background protection") },
+                text = { Text("Allow notifications for live progress, then allow unrestricted battery use so health checks can continue when you switch apps or lock your phone. Android controls this setting; RaaSHub cannot enable it silently.") },
                 confirmButton = {
-                    TextButton(onClick = {
-                        showNotificationPrompt = false
-                        notificationPrefs.edit().putBoolean("prompt_shown", true).apply()
-                        (context as? MainActivity)?.requestNotificationPermissionIfNeeded()
-                    }) { Text("Allow notifications") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = {
+                            showSetupPrompt = false
+                            backgroundPrefs.edit().putBoolean("setup_prompt_handled", true).apply()
+                            (context as? MainActivity)?.requestNotificationPermissionIfNeeded()
+                        }) { Text("Notifications") }
+                        TextButton(onClick = {
+                            showSetupPrompt = false
+                            backgroundPrefs.edit().putBoolean("setup_prompt_handled", true).apply()
+                            (context as? MainActivity)?.requestBackgroundUnrestricted()
+                        }) { Text("Background access") }
+                    }
                 },
                 dismissButton = {
                     TextButton(onClick = {
-                        showNotificationPrompt = false
-                        notificationPrefs.edit().putBoolean("prompt_shown", true).apply()
-                    }) { Text("Not now") }
+                        showSetupPrompt = false
+                        backgroundPrefs.edit().putBoolean("setup_prompt_handled", true).apply()
+                    }) { Text("Later") }
                 }
             )
         }
@@ -1168,7 +1213,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                         }
                         LinearProgressIndicator(progress = { if (progressTotal > 0) progressDone.toFloat() / progressTotal else 0f }, modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape))
                         Spacer(Modifier.height(4.dp))
-                        Text("Please keep RaaSHub open for the most reliable check.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("The foreground service keeps the scan active when you switch apps. Unrestricted battery access improves reliability on devices with aggressive power management.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Spacer(Modifier.height(10.dp))
                     Button(onClick = onRunChecks, enabled = !checking && sources.isNotEmpty()) {
@@ -1186,7 +1231,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(if (checking) "Live workers" else "Last worker activity", fontWeight = FontWeight.SemiBold)
                         Text("${workers.count { it.status == "Checking" }} URL slots currently checking • ${workers.count { it.status == "Waiting" }} waiting", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("Two independent crawlers, up to 64 URL slots each (128 total). A slot handles one URL at a time.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Two independent crawlers: up to 32 direct clear-web slots and 24 Tor onion slots. Each slot handles one URL at a time.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         workers.forEach { worker ->
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text("${worker.id}: ${worker.status}", fontWeight = FontWeight.Medium, fontSize = 12.sp)
@@ -1200,8 +1245,13 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                 Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(if (checking) "Live activity log" else "Last scan activity log", fontWeight = FontWeight.SemiBold)
-                        Text("Plain-text updates from the current scan", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(activityLog, fontSize = 10.sp, lineHeight = 14.sp)
+                        Text("Newest events first • chunk saves and worker transitions", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        activityLog.lines().filter { it.isNotBlank() }.takeLast(36).asReversed().forEach { line ->
+                            Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Box(Modifier.padding(top = 4.dp).size(6.dp).clip(CircleShape).background(if (line.contains("saved", true) || line.contains("completed", true)) Color(0xFF16B887) else MaterialTheme.colorScheme.secondary))
+                                Text(line, Modifier.weight(1f), fontSize = 10.sp, lineHeight = 14.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            }
+                        }
                     }
                 }
             }
@@ -1363,13 +1413,13 @@ class HealthCheckService : Service() {
                     update(done, count, "Health check running: $done/$count (${if (count == 0) 0 else done * 100 / count}%)", true)
                 }, { workers, log ->
                     val active = workers.count { it.status == "Checking" }
-                    update(lastProgress, total, "Active workers: $active • ${workers.size} worker slots", true, log)
+                    update(lastProgress, total, "Active workers: $active • ${workers.size} worker slots", true, log, workers = workers)
                 }) { crawler, chunk, chunkCount, partialResults ->
                     val onionCount = partialResults.keys.count { Uri.parse(it).host?.endsWith(".onion", true) == true }
                     val clearCount = partialResults.size - onionCount
                     val partialMessage = "$crawler chunk $chunk/$chunkCount saved. $onionCount onion and $clearCount clear-web URLs have detailed results stored; remaining chunks continue."
                     saveLatestHealthReport(this@HealthCheckService, HealthReport(true, null, partialMessage, partialResults))
-                    update(lastProgress, total, partialMessage, true, partialMessage)
+                    update(lastProgress, total, partialMessage, true, partialMessage, reportUpdated = true)
                 }
                 saveLatestHealthReport(this@HealthCheckService, report)
                 update(total, total, "Completed: ${report.message}", false)
@@ -1384,12 +1434,21 @@ class HealthCheckService : Service() {
         return START_STICKY
     }
 
-    private fun update(done: Int, total: Int, message: String, running: Boolean, log: String = message) {
+    private fun update(
+        done: Int, total: Int, message: String, running: Boolean, log: String = message,
+        workers: List<WorkerProgress> = emptyList(), reportUpdated: Boolean = false
+    ) {
         lastProgress = done
         runCatching { getSystemService(NotificationManager::class.java).notify(notificationId, buildNotification(done, total, message, running)) }
+        val workersJson = JSONArray().apply {
+            workers.forEach { worker ->
+                put(org.json.JSONObject().put("id", worker.id).put("status", worker.status).put("url", worker.url))
+            }
+        }.toString()
         sendBroadcast(Intent(ACTION_UPDATE).setPackage(packageName)
             .putExtra("done", done).putExtra("total", total)
-            .putExtra("running", running).putExtra("log", log.takeLast(12000)))
+            .putExtra("running", running).putExtra("log", log.takeLast(12000))
+            .putExtra("workers", workersJson).putExtra("reportUpdated", reportUpdated))
     }
 
     private fun buildNotification(done: Int, total: Int, message: String, running: Boolean) =

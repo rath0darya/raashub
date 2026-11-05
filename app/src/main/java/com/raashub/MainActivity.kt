@@ -1315,9 +1315,16 @@ class HealthCheckService : Service() {
     private val notificationId = 4108
     @Volatile private var scanStarted = false
     @Volatile private var lastProgress: Int = 0
+    private var torBound = false
+    private val torServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) { torBound = true }
+        override fun onServiceDisconnected(name: ComponentName?) { torBound = false }
+    }
 
     override fun onCreate() {
         super.onCreate()
+        // Keep Tor alive for the entire background scan, even if MainActivity is destroyed.
+        torBound = runCatching { bindService(Intent(this, TorService::class.java), torServiceConnection, BIND_AUTO_CREATE) }.getOrDefault(false)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
                 NotificationChannel(channelId, "Background health check", NotificationManager.IMPORTANCE_LOW).apply {
@@ -1384,6 +1391,8 @@ class HealthCheckService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() {
+        if (torBound) runCatching { unbindService(torServiceConnection) }
+        torBound = false
         serviceScope.cancel()
         super.onDestroy()
     }

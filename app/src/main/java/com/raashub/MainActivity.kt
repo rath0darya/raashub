@@ -225,10 +225,11 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         )
     }
 
-    // Keep the total cap at 128 concurrent URL jobs and 256 HTTP/HTTPS probes.
-    // Each crawler has its own queue and 64 slots, so Tor startup cannot hold up clear-web checks.
-    val slotsPerCrawler = 64
-    val networkDispatcher = Dispatchers.IO.limitedParallelism(256)
+    // Tor uses a lower concurrency cap to avoid saturating the local Tor daemon.
+    // Clear-web checks continue independently while Tor starts or is unavailable.
+    val clearWebSlots = 32
+    val onionSlots = 24
+    val networkDispatcher = Dispatchers.IO.limitedParallelism(96)
     val completed = AtomicInteger(0)
     val activeUrls = AtomicInteger(0)
     val peakActiveUrls = AtomicInteger(0)
@@ -316,7 +317,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     kotlinx.coroutines.coroutineScope {
         // This job starts immediately and uses direct sockets for non-onion hosts.
         val clearWebJob = launch {
-            runCrawler("Clear-web crawler", clearWebSources, slotsPerCrawler, null)
+            runCrawler("Clear-web crawler", clearWebSources, clearWebSlots, null)
         }
 
         // Tor discovery/circuit readiness runs only for onion URLs and never gates clear-web.
@@ -342,7 +343,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                     "No Tor SOCKS listener was found; onion results will show Offline. Clear-web crawler is not affected."
                 else "Tor SOCKS listener found; onion-only crawler starting."
             )
-            runCrawler("Onion crawler", onionSources, slotsPerCrawler, proxyPort)
+            runCrawler("Onion crawler", onionSources, onionSlots, proxyPort)
         }
 
         clearWebJob.join()
@@ -354,7 +355,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val responded = finalResults.values.count { it.responseCode != null }
     val offline = finalResults.size - responded
     val successful = finalResults.values.count { result -> result.responseCode?.let { it in 200..299 } == true }
-    val message = "Processed ${finalResults.size}/${allSources.size} URLs. Separate crawlers: ${clearWebSources.size} clear-web URLs checked directly; ${onionSources.size} onion URLs checked through Tor only. Concurrency: up to 64 direct + 64 Tor URL jobs, with HTTP/HTTPS probes capped at 256. Peak active URL jobs: ${peakActiveUrls.get()}. $responded responded ($successful successful 2xx); $offline had no HTTP response."
+    val message = "Processed ${finalResults.size}/${allSources.size} URLs. Clear-web: ${clearWebSources.size} direct; onion: ${onionSources.size} through Tor only. Concurrency: up to 32 direct + 24 Tor jobs. Each protocol attempt has a 7-second network deadline; the alternate protocol is tried only if the first does not respond. Peak active URL jobs: ${peakActiveUrls.get()}. $responded responded ($successful successful 2xx); $offline had no HTTP response."
     return HealthReport(onionSources.isEmpty() || onionProxyPort != null, onionProxyPort, message, finalResults)
 }
 private fun isTorCircuitReady(proxyPort: Int): Boolean {
@@ -411,49 +412,37 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
     val primaryUrl = uri.buildUpon().scheme(scheme).build().toString()
     val alternateUrl = uri.buildUpon().scheme(alternate).build().toString()
 
-    // Check both protocols concurrently. The final user-facing result is always Online or Offline.
-    // Keep HTTP and HTTPS parallel so a broken scheme does not block the other.
-    fun probe(url: String): HealthResult = checkOneOnionAttempt(url, proxyPort, 20000)
-
-    // Always test both protocols. Onion services may publish HTTP URLs while also
-    // serving HTTPS, or publish HTTPS URLs while only accepting HTTP.
-    val (primary, alternateResult) = kotlinx.coroutines.coroutineScope {
-        val first = async(networkDispatcher) { probe(primaryUrl) }
-        val second = async(networkDispatcher) { probe(alternateUrl) }
-        first.await() to second.await()
+    // A responding primary endpoint is enough for an availability check.
+    // Only spend time on the alternate protocol when the declared one fails.
+    val primary = kotlinx.coroutines.withContext(networkDispatcher) {
+        checkOneOnionAttempt(primaryUrl, proxyPort, 7000)
     }
-    val candidates = listOf(primary, alternateResult)
-    val selected = candidates.maxByOrNull { result ->
-        val code = result.responseCode
-        when {
-            code == null -> if (result.error.contains("TLS/HTTPS handshake failed", true)) 1 else 0
-            code in 200..299 -> 7
-            code in 300..399 -> 6
-            code in 500..599 -> 5
-            code in 400..499 -> 4
-            code in 100..199 -> 3
-            else -> 0
+    if (primary.responseCode != null) {
+        val headers = linkedMapOf<String, String>().apply {
+            putAll(primary.headers)
+            put("x-raashub-$scheme-probe", "HTTP ${primary.responseCode}")
+            put("x-raashub-$alternate-probe", "Not attempted (primary responded)")
         }
-    } ?: primary
-    val combinedHeaders = linkedMapOf<String, String>()
-    combinedHeaders.putAll(selected.headers)
-    combinedHeaders["x-raashub-http-probe"] =
-        if (scheme == "http") primary.responseCode?.let { "HTTP $it" } ?: primary.error.ifBlank { primary.status }
-        else alternateResult.responseCode?.let { "HTTP $it" } ?: alternateResult.error.ifBlank { alternateResult.status }
-    combinedHeaders["x-raashub-https-probe"] =
-        if (scheme == "https") primary.responseCode?.let { "HTTP $it" } ?: primary.error.ifBlank { primary.status }
-        else alternateResult.responseCode?.let { "HTTP $it" } ?: alternateResult.error.ifBlank { alternateResult.status }
-    val reachable = candidates.filter { it.responseCode != null }
-    val summary = if (reachable.isEmpty()) "Offline" else candidates.joinToString("; ") { result ->
-        val isHttps = Uri.parse(result.finalUrl.ifBlank { urlText }).scheme.equals("https", true)
-        "${if (isHttps) "HTTPS" else "HTTP"}: ${result.responseCode?.let { "HTTP $it" } ?: "No response"}"
+        return primary.copy(headers = headers, detail = "${scheme.uppercase()}: HTTP ${primary.responseCode}")
     }
+
+    val fallback = kotlinx.coroutines.withContext(networkDispatcher) {
+        checkOneOnionAttempt(alternateUrl, proxyPort, 7000)
+    }
+    val selected = if (fallback.responseCode != null) fallback else primary
+    val headers = linkedMapOf<String, String>().apply {
+        putAll(selected.headers)
+        put("x-raashub-$scheme-probe", primary.error.ifBlank { primary.status })
+        put("x-raashub-$alternate-probe", fallback.responseCode?.let { "HTTP $it" } ?: fallback.error.ifBlank { fallback.status })
+    }
+    val reachable = fallback.responseCode != null
     return selected.copy(
-        detail = if (reachable.isEmpty()) candidates.map { it.error }.filter { it.isNotBlank() }.distinct().joinToString("; ").ifBlank { "No HTTP response" } else summary,
-        finalUrl = selected.finalUrl.ifBlank { primaryUrl },
-        headers = combinedHeaders,
+        detail = if (reachable) "${alternate.uppercase()}: HTTP ${fallback.responseCode}" else
+            listOf(primary.error, fallback.error).filter { it.isNotBlank() }.distinct().joinToString("; ").ifBlank { "No HTTP response" },
+        finalUrl = selected.finalUrl.ifBlank { if (reachable) alternateUrl else primaryUrl },
+        headers = headers,
         status = selected.responseCode?.let(::statusForHttpCode) ?: "Offline",
-        error = if (reachable.isEmpty()) candidates.map { it.error }.filter { it.isNotBlank() }.distinct().joinToString("; ").ifBlank { selected.error } else ""
+        error = if (reachable) "" else listOf(primary.error, fallback.error).filter { it.isNotBlank() }.distinct().joinToString("; ").ifBlank { selected.error }
     )
 }
 
@@ -476,40 +465,42 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
         if (scheme != "http" && scheme != "https") throw IOException("Unsupported URL scheme")
         if (isOnion && proxyPort == null) throw IOException("Tor proxy unavailable; onion URL not checked")
         val port = if (uri.port > 0) uri.port else if (scheme == "https") 443 else 80
+        val deadlineNanos = System.nanoTime() + readTimeoutMs * 1_000_000L
         val raw = Socket()
         raw.soTimeout = readTimeoutMs
         try {
             if (isOnion) {
-                raw.connect(InetSocketAddress("127.0.0.1", proxyPort!!), 5000)
+                raw.connect(InetSocketAddress("127.0.0.1", proxyPort!!), minOf(1800, readTimeoutMs))
                 val out = raw.getOutputStream()
                 out.write(byteArrayOf(5, 1, 0)); out.flush()
-                val greeting = ByteArray(2); readFully(raw, greeting)
+                val greeting = ByteArray(2); readFullyBeforeDeadline(raw, greeting, deadlineNanos)
                 if (greeting[0].toInt() != 5 || greeting[1].toInt() != 0) throw IOException("SOCKS5 negotiation failed")
                 val hostBytes = host.toByteArray(StandardCharsets.US_ASCII)
                 if (hostBytes.size > 255) throw IOException("Invalid onion hostname")
                 out.write(byteArrayOf(5, 1, 0, 3, hostBytes.size.toByte()))
                 out.write(hostBytes)
                 out.write(byteArrayOf((port shr 8).toByte(), port.toByte())); out.flush()
-                val reply = ByteArray(4); readFully(raw, reply)
+                val reply = ByteArray(4); readFullyBeforeDeadline(raw, reply, deadlineNanos)
                 if (reply[0].toInt() != 5 || reply[1].toInt() != 0) throw IOException("Tor SOCKS reply ${reply[1].toInt() and 0xff}")
                 when (reply[3].toInt() and 0xff) {
-                    1 -> skipFully(raw, 4)
-                    3 -> { val length = raw.getInputStream().read(); if (length < 0) throw IOException("Incomplete SOCKS reply"); skipFully(raw, length) }
-                    4 -> skipFully(raw, 16)
+                    1 -> skipFullyBeforeDeadline(raw, 4, deadlineNanos)
+                    3 -> { applyReadDeadline(raw, deadlineNanos); val length = raw.getInputStream().read(); if (length < 0) throw IOException("Incomplete SOCKS reply"); skipFullyBeforeDeadline(raw, length, deadlineNanos) }
+                    4 -> skipFullyBeforeDeadline(raw, 16, deadlineNanos)
                     else -> throw IOException("Invalid SOCKS address type")
                 }
-                skipFully(raw, 2)
+                skipFullyBeforeDeadline(raw, 2, deadlineNanos)
             } else {
-                raw.connect(InetSocketAddress(host, port), 7000)
+                raw.connect(InetSocketAddress(host, port), minOf(2500, readTimeoutMs))
             }
             val active: Socket = if (scheme == "https") {
                 val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory).createSocket(raw, host, port, true) as SSLSocket
                 ssl.sslParameters = ssl.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+                applyReadDeadline(ssl, deadlineNanos)
                 ssl.startHandshake()
                 ssl
             } else raw
             active.use { connection ->
-                connection.soTimeout = readTimeoutMs
+                applyReadDeadline(connection, deadlineNanos)
                 val path = (uri.encodedPath?.takeIf { it.isNotEmpty() } ?: "/") + (uri.encodedQuery?.let { "?$it" } ?: "")
                 val defaultPort = if (scheme == "https") 443 else 80
                 val hostHeader = if (port == defaultPort) host else "$host:$port"
@@ -517,6 +508,7 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
                 connection.getOutputStream().write(request.toByteArray(StandardCharsets.ISO_8859_1))
                 connection.getOutputStream().flush()
                 val reader = BufferedReader(InputStreamReader(connection.getInputStream(), StandardCharsets.ISO_8859_1))
+                applyReadDeadline(connection, deadlineNanos)
                 val statusLine = reader.readLine() ?: throw IOException("Empty HTTP response")
                 val match = Regex("^HTTP/(\\d(?:\\.\\d)?)\\s+(\\d{3})").find(statusLine)
                     ?: throw IOException("Unrecognised HTTP response")
@@ -526,6 +518,7 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
                 var headerBytes = 0
                 var headerCount = 0
                 while (true) {
+                    applyReadDeadline(connection, deadlineNanos)
                     val line = reader.readLine() ?: break
                     headerBytes += line.length + 2
                     headerCount++
@@ -557,6 +550,30 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
     } catch (e: Exception) {
         val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
         HealthResult("Offline", "No HTTP response", checkedAt, finalUrl = urlText, error = reason)
+    }
+}
+
+private fun applyReadDeadline(socket: Socket, deadlineNanos: Long) {
+    val remainingNanos = deadlineNanos - System.nanoTime()
+    if (remainingNanos <= 0L) throw java.net.SocketTimeoutException("Health-check attempt exceeded its time limit")
+    val remainingMs = ((remainingNanos + 999_999L) / 1_000_000L).coerceIn(1L, Int.MAX_VALUE.toLong())
+    socket.soTimeout = remainingMs.toInt()
+}
+
+private fun readFullyBeforeDeadline(socket: Socket, buffer: ByteArray, deadlineNanos: Long) {
+    var offset = 0
+    while (offset < buffer.size) {
+        applyReadDeadline(socket, deadlineNanos)
+        val count = socket.getInputStream().read(buffer, offset, buffer.size - offset)
+        if (count < 0) throw IOException("Unexpected end of SOCKS response")
+        offset += count
+    }
+}
+
+private fun skipFullyBeforeDeadline(socket: Socket, amount: Int, deadlineNanos: Long) {
+    repeat(amount) {
+        applyReadDeadline(socket, deadlineNanos)
+        if (socket.getInputStream().read() < 0) throw IOException("Unexpected end of SOCKS response")
     }
 }
 

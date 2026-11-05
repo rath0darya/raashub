@@ -1148,8 +1148,10 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                         Text(entry.url, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                         StateLine("Result", result.status, when (result.status) {
                             "Online" -> Color(0xFF16B887)
-                            "Responding" -> Color(0xFFB88922)
-                            "Server error" -> Color(0xFFE58B35)
+                            "Redirect" -> Color(0xFF8B7CFF)
+                            "Informational" -> Color(0xFF4DA6FF)
+                            "Client error" -> Color(0xFFFFB547)
+                            "Server error" -> Color(0xFFFF5D67)
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         })
                         Text(result.detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -1,4 +1,4 @@
-name: Build RaaSHub Android APK
+name: RaaSHub Android CI and signed release
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: raashub-android-apk-${{ github.ref }}
+  group: raashub-android-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -19,7 +19,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -41,13 +41,14 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Permanently deduplicate source URLs
-        run: python3 scripts/deduplicate_source_urls.py
+      - name: Validate and deduplicate source data
+        run: |
+          set -euo pipefail
+          python3 scripts/deduplicate_source_urls.py
+          python3 scripts/build_android_source_index.py
+          python3 -m json.tool app/src/main/assets/onion_sources.json >/dev/null
 
-      - name: Generate offline onion source index
-        run: python3 scripts/build_android_source_index.py
-
-      - name: Install original app logo
+      - name: Generate launcher and in-app logo resources
         run: |
           set -euo pipefail
           test -s assets/images/raashub-logo.png
@@ -60,7 +61,6 @@ jobs:
           from pathlib import Path
           source = Path("assets/images/raashub-logo.png")
           artwork = Image.open(source).convert("RGBA")
-          # Keep a transparent, padded foreground for Android adaptive icons.
           size = 432
           artwork.thumbnail((276, 276), Image.Resampling.LANCZOS)
           foreground = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -68,75 +68,103 @@ jobs:
           res = Path("app/src/main/res")
           (res / "drawable-nodpi").mkdir(parents=True, exist_ok=True)
           foreground.save(res / "drawable-nodpi/raashub_logo_foreground.png", optimize=True)
-          # Android themed icons use the monochrome alpha mask and tint it to the launcher theme.
           alpha = artwork.getchannel("A")
           if alpha.getextrema() == (255, 255):
-              gray = artwork.convert("RGB").convert("L")
-              alpha = gray.point(lambda p: 255 if p > 28 else 0)
+              alpha = artwork.convert("RGB").convert("L").point(lambda p: 255 if p > 28 else 0)
           mono_art = Image.new("RGBA", artwork.size, (255, 255, 255, 0))
           mono_art.putalpha(alpha)
           mono = Image.new("RGBA", (size, size), (255, 255, 255, 0))
           mono.alpha_composite(mono_art, ((size-artwork.width)//2, (size-artwork.height)//2))
           mono.save(res / "drawable-nodpi/raashub_icon_monochrome.png", optimize=True)
-          # Build a dedicated in-app logo asset from the visible artwork bounds.
-          # ContentScale.Fit cannot remove padding already baked into the source PNG.
-          # Preserve the launcher artwork separately; only the in-app asset is tightened.
           original = Image.open(source).convert("RGBA")
           alpha = original.getchannel("A")
           if alpha.getextrema() != (255, 255):
               visible = alpha.point(lambda p: 255 if p > 12 else 0)
           else:
-              # The source has an opaque background. Find non-background artwork
-              # against the expected black canvas, ignoring near-black compression noise.
-              rgb = original.convert("RGB")
-              visible = rgb.convert("L").point(lambda p: 255 if p > 18 else 0)
+              visible = original.convert("RGB").convert("L").point(lambda p: 255 if p > 18 else 0)
           bbox = visible.getbbox()
           if bbox:
               original = original.crop(bbox)
-          # Make a square, black-backed asset with only a small, intentional margin.
-          # This makes the logo fill the in-app square container without stretching it.
           side = max(original.width, original.height)
           padding = max(2, round(side * 0.04))
-          target_side = max(1, side - 2 * padding)
-          original.thumbnail((target_side, target_side), Image.Resampling.LANCZOS)
+          original.thumbnail((max(1, side-2*padding), max(1, side-2*padding)), Image.Resampling.LANCZOS)
           icon_canvas = Image.new("RGBA", (side, side), (0, 0, 0, 255))
           icon_canvas.alpha_composite(original, ((side-original.width)//2, (side-original.height)//2))
-          icon = res / "drawable-nodpi/raashub_logo.png"
-          icon_canvas.convert("RGB").save(icon, format="PNG", optimize=True)
-          # Adaptive icon resource definitions and system-themed icon support.
+          icon_canvas.convert("RGB").save(res / "drawable-nodpi/raashub_logo.png", format="PNG", optimize=True)
           (res / "mipmap-anydpi-v26").mkdir(parents=True, exist_ok=True)
-          adaptive = '''<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+          adaptive = """<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
               <background android:drawable="@color/raashub_icon_background" />
               <foreground android:drawable="@drawable/raashub_logo_foreground" />
               <monochrome android:drawable="@drawable/raashub_icon_monochrome" />
-          </adaptive-icon>'''
+          </adaptive-icon>"""
           for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
               (res / "mipmap-anydpi-v26" / name).write_text(adaptive + "\n")
           (res / "values").mkdir(parents=True, exist_ok=True)
-          (res / "values/raashub_icon_colors.xml").write_text('''<resources>
-              <color name="raashub_icon_background">#0A1020</color>
-          </resources>\n''')
+          (res / "values/raashub_icon_colors.xml").write_text("<resources>\n    <color name=\"raashub_icon_background\">#0A1020</color>\n</resources>\n")
           (res / "drawable").mkdir(parents=True, exist_ok=True)
-          (res / "drawable/raashub_notification.xml").write_text('''<vector xmlns:android="http://schemas.android.com/apk/res/android"
+          (res / "drawable/raashub_notification.xml").write_text("""<vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
               <path android:fillColor="#FFFFFFFF" android:pathData="M12,1 3,5v6c0,5.25 3.65,10.15 9,12 5.35,-1.85 9,-6.75 9,-12V5L12,1z M10.2,16.2 6.7,12.7 8.1,11.3 10.2,13.4 15.9,7.7 17.3,9.1z" />
-          </vector>\n''')
+          </vector>\n""")
           PY
 
-      - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+      - name: Run Android unit tests
+        run: gradle --no-daemon :app:testDebugUnitTest
 
-      - name: Copy and verify APK in repository Download folder
+      - name: Build debug APK for pull requests and non-main manual runs
+        if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Validate release signing secrets
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          source_apk="app/build/outputs/apk/debug/app-debug.apk"
-          destination="Download/RaaSHub.apk"
-          test -s "$source_apk"
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Required repository secret $name is missing."
+              exit 1
+            fi
+          done
+          KEYSTORE_FILE="$RUNNER_TEMP/raashub-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+          test -s "$KEYSTORE_FILE"
+          keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
+          echo "Release keystore and alias validated."
+          echo "RAASHUB_RELEASE_STORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          RAASHUB_RELEASE_STORE_FILE: ${{ runner.temp }}/raashub-release.jks
+          RAASHUB_RELEASE_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          RAASHUB_RELEASE_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          RAASHUB_RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          RAASHUB_VERSION_CODE: ${{ github.run_number }}
+          RAASHUB_VERSION_NAME: 1.0.${{ github.run_number }}
+        run: gradle --no-daemon :app:assembleRelease
+
+      - name: Stage and verify APK
+        run: |
+          set -euo pipefail
           mkdir -p Download
-          cp "$source_apk" "$destination"
-          test -s "$destination"
-          sha256sum "$destination"
-          ls -lh "$destination"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            APK="app/build/outputs/apk/debug/app-debug.apk"
+          else
+            APK="app/build/outputs/apk/release/app-release.apk"
+          fi
+          test -s "$APK"
+          cp "$APK" Download/RaaSHub.apk
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs Download/RaaSHub.apk
+            "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging Download/RaaSHub.apk | grep -F "package: name='com.raashub'"
+          fi
+          sha256sum Download/RaaSHub.apk
+          ls -lh Download/RaaSHub.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -146,33 +174,12 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Commit APK to repository
-        if: github.event_name != 'pull_request'
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Download/RaaSHub.apk data/directory.json data/groups/
-          if git diff --cached --quiet; then
-            echo "APK unchanged; no commit needed."
-            exit 0
-          fi
-          git commit -m "Add verified RaaSHub Android APK"
-          # Other repository edits may land while Gradle is building. Rebase this
-          # APK-only commit on the latest main before pushing, rather than failing
-          # with a non-fast-forward rejection.
-          if ! git pull --rebase origin main; then
-            # The APK is a binary file, so simultaneous APK builds can conflict
-            # while replaying the APK-only commit. Rebase abort + soft reset keeps
-            # this build's generated APK staged on the newest main commit.
-            git rebase --abort
-            git fetch origin main
-            git reset --soft origin/main
-            git add Download/RaaSHub.apk
-            if git diff --cached --quiet; then
-              echo "APK already matches the latest main; no commit needed."
-              exit 0
-            fi
-            git commit -m "Add verified RaaSHub Android APK"
-          fi
-          git push
+      - name: Publish signed APK release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: RaaSHub v1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: Download/RaaSHub.apk

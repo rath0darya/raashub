@@ -12,9 +12,27 @@ android {
         applicationId = "com.raashub"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        // CI increments versionCode for every signed release so Android accepts in-place updates.
+        versionCode = 10000 + (providers.environmentVariable("RAASHUB_VERSION_CODE").orNull?.toIntOrNull() ?: 1)
+        versionName = providers.environmentVariable("RAASHUB_VERSION_NAME").orNull ?: "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = providers.environmentVariable("RAASHUB_RELEASE_STORE_FILE").orNull?.let { file(it) }
+            storePassword = providers.environmentVariable("RAASHUB_RELEASE_STORE_PASSWORD").orNull
+            keyAlias = providers.environmentVariable("RAASHUB_RELEASE_KEY_ALIAS").orNull
+            keyPassword = providers.environmentVariable("RAASHUB_RELEASE_KEY_PASSWORD").orNull
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            // Release signing is supplied only by the protected GitHub Actions secrets.
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = false
+        }
     }
 
     // Keep Java and Kotlin bytecode targets aligned for Gradle validation.

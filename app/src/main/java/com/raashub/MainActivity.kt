@@ -166,7 +166,8 @@ private fun loadLatestHealthReport(context: android.content.Context): HealthRepo
         headersObject.keys().forEach { key -> headers[key] = headersObject.optString(key) }
         val code = if (item.isNull("responseCode")) null else item.optInt("responseCode")
         results[item.optString("url")] = HealthResult(
-            status = if (item.optString("status", "Offline") == "Online") "Online" else "Offline", detail = if (item.optString("status", "Offline") == "Online") item.optString("detail") else "Offline",
+            status = item.optString("status", "Offline").takeIf { it in setOf("Online", "Redirect", "Client error", "Server error", "Informational") } ?: "Offline",
+            detail = item.optString("detail").ifBlank { "Offline" },
             checkedAt = item.optLong("checkedAt"), responseCode = code,
             httpVersion = item.optString("httpVersion", "—"), finalUrl = item.optString("finalUrl"),
             title = item.optString("title"), contentType = item.optString("contentType"),
@@ -264,8 +265,9 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                         try {
                             val result = try {
                                 checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
-                            } catch (_: Exception) {
-                                HealthResult("Offline", "Offline", System.currentTimeMillis(), finalUrl = entry.url, error = "")
+                            } catch (e: Exception) {
+                                val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                                HealthResult("Offline", "No HTTP response", System.currentTimeMillis(), finalUrl = entry.url, error = reason)
                             }
                             results[entry.url] = result
                             publishWorker(workerId, result.status, entry.url, "$workerId finished: ${result.status} — ${result.detail}")
@@ -319,9 +321,10 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     }
 
     val finalResults = results.toMap()
-    val online = finalResults.values.count { it.status == "Online" }
-    val offline = finalResults.size - online
-    val message = "Processed ${finalResults.size}/${allSources.size} URLs. Separate crawlers: ${clearWebSources.size} clear-web URLs checked directly; ${onionSources.size} onion URLs checked through Tor only. Concurrency: up to 64 direct + 64 Tor URL jobs, with HTTP/HTTPS probes capped at 256. Peak active URL jobs: ${peakActiveUrls.get()}. $online online; $offline offline. Offline means no HTTP response was received during this check."
+    val responded = finalResults.values.count { it.responseCode != null }
+    val offline = finalResults.size - responded
+    val successful = finalResults.values.count { result -> result.responseCode?.let { it in 200..299 } == true }
+    val message = "Processed ${finalResults.size}/${allSources.size} URLs. Separate crawlers: ${clearWebSources.size} clear-web URLs checked directly; ${onionSources.size} onion URLs checked through Tor only. Concurrency: up to 64 direct + 64 Tor URL jobs, with HTTP/HTTPS probes capped at 256. Peak active URL jobs: ${peakActiveUrls.get()}. $responded responded ($successful successful 2xx); $offline had no HTTP response."
     return HealthReport(onionSources.isEmpty() || onionProxyPort != null, onionProxyPort, message, finalResults)
 }
 private fun isTorCircuitReady(proxyPort: Int): Boolean {
@@ -413,12 +416,21 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
         "${if (isHttps) "HTTPS" else "HTTP"}: ${result.responseCode?.let { "HTTP $it" } ?: "No response"}"
     }
     return selected.copy(
-        detail = if (reachable.isEmpty()) "Offline" else summary,
+        detail = if (reachable.isEmpty()) candidates.map { it.error }.filter { it.isNotBlank() }.distinct().joinToString("; ").ifBlank { "No HTTP response" } else summary,
         finalUrl = selected.finalUrl.ifBlank { primaryUrl },
         headers = combinedHeaders,
-        status = if (reachable.any { it.responseCode != null }) "Online" else "Offline",
-        error = ""
+        status = selected.responseCode?.let(::statusForHttpCode) ?: "Offline",
+        error = if (reachable.isEmpty()) candidates.map { it.error }.filter { it.isNotBlank() }.distinct().joinToString("; ").ifBlank { selected.error } else ""
     )
+}
+
+private fun statusForHttpCode(code: Int): String = when (code) {
+    in 100..199 -> "Informational"
+    in 200..299 -> "Online"
+    in 300..399 -> "Redirect"
+    in 400..499 -> "Client error"
+    in 500..599 -> "Server error"
+    else -> "Offline"
 }
 
 private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs: Int): HealthResult {
@@ -492,7 +504,7 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
                 val contentType = headers["content-type"].orEmpty()
                 val server = headers["server"].orEmpty()
                 val detail = "HTTP $code • ${if (code in 200..399) "responded" else "server responded"}"
-                val status = "Online"
+                val status = statusForHttpCode(code)
                 HealthResult(
                     status = status, detail = detail, checkedAt = checkedAt, responseCode = code,
                     httpVersion = httpVersion, finalUrl = urlText, title = title,
@@ -503,7 +515,8 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
             }
         } finally { runCatching { raw.close() } }
     } catch (e: Exception) {
-        HealthResult("Offline", "Offline", checkedAt, finalUrl = urlText, error = "")
+        val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+        HealthResult("Offline", "No HTTP response", checkedAt, finalUrl = urlText, error = reason)
     }
 }
 
@@ -963,7 +976,7 @@ private fun SourceCard(group: OnionGroup, health: Map<String, HealthResult> = em
                             Surface(shape = RoundedCornerShape(8.dp), color = latestColor.copy(alpha = .14f)) {
                                 Text("$responses/${group.urls.size} responded", modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = latestColor, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                             }
-                            groupResults.groupBy { if (it.status == "Online") "Online" else "Offline" }
+                            groupResults.groupBy { it.status }
                                 .entries.sortedBy { it.key }.take(4).forEach { (kind, entries) ->
                                     Text("$kind ${entries.size}", fontSize = 10.sp, color = responseStatusColor(entries.firstOrNull()))
                                 }
@@ -994,7 +1007,7 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
                     "Client error" -> "4xx • Client error"
                     "Server error" -> "5xx • Server error"
                     "Informational" -> "1xx • Informational"
-                    "Offline" -> "Offline"
+                    "Offline" -> "No HTTP response"
                     else -> "Not checked"
                 }
                 val statusColor = responseStatusColor(result)
@@ -1103,7 +1116,7 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(if (checking) "Live workers" else "Last worker activity", fontWeight = FontWeight.SemiBold)
                         Text("${workers.count { it.status == "Checking" }} URL slots currently checking • ${workers.count { it.status == "Waiting" }} waiting", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("16 worker groups × up to 8 URL slots each. A slot handles one URL at a time.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Two independent crawlers, up to 64 URL slots each (128 total). A slot handles one URL at a time.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         workers.forEach { worker ->
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text("${worker.id}: ${worker.status}", fontWeight = FontWeight.Medium, fontSize = 12.sp)
@@ -1135,8 +1148,10 @@ private fun Activity(sources: List<OnionEntry>, checking: Boolean, report: Healt
                         Text(entry.url, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                         StateLine("Result", result.status, when (result.status) {
                             "Online" -> Color(0xFF16B887)
-                            "Responding" -> Color(0xFFB88922)
-                            "Server error" -> Color(0xFFE58B35)
+                            "Redirect" -> Color(0xFF8B7CFF)
+                            "Informational" -> Color(0xFF4DA6FF)
+                            "Client error" -> Color(0xFFFFB547)
+                            "Server error" -> Color(0xFFFF5D67)
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         })
                         Text(result.detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)

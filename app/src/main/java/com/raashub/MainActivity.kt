@@ -152,7 +152,7 @@ private fun saveLatestHealthReport(context: android.content.Context, report: Hea
         val results = org.json.JSONArray()
         report.results.forEach { (url, result) ->
             val headers = org.json.JSONObject()
-            result.headers.entries.take(24).forEach { (key, value) -> headers.put(key, value.take(512)) }
+            result.headers.entries.forEach { (key, value) -> headers.put(key, value) }
             results.put(org.json.JSONObject()
                 .put("url", url).put("status", result.status).put("detail", result.detail)
                 .put("checkedAt", result.checkedAt).put("responseCode", result.responseCode ?: org.json.JSONObject.NULL)
@@ -542,7 +542,7 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
                     if (headerBytes > 65536 || headerCount > 100) throw IOException("HTTP response headers exceed the safety limit")
                     if (line.isEmpty()) break
                     val split = line.indexOf(':')
-                    if (split > 0 && headers.size < 40) {
+                    if (split > 0) {
                         val name = line.substring(0, split).trim().lowercase()
                         val value = line.substring(split + 1).trim().take(2048)
                         headers[name] = if (headers.containsKey(name)) (headers.getValue(name) + ", " + value).take(2048) else value
@@ -1125,62 +1125,137 @@ private fun SourceCard(group: OnionGroup, health: Map<String, HealthResult> = em
 
 @Composable
 private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack: () -> Unit, onCopy: (String) -> Unit, onOpen: (String) -> Unit) {
+    var selectedEntry by remember(group.name) { mutableStateOf<OnionEntry?>(null) }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text("Back") }
         Text(group.name, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
         Text("${group.urls.size} URLs • ${group.categories.joinToString { it.replaceFirstChar { ch -> ch.uppercase() } }}", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 20.dp)) {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(vertical = 12.dp, bottom = 20.dp)) {
             items(group.entries, key = { it.url }) { entry ->
                 val result = health[entry.url]
                 val statusLabel = when (result?.status) {
-                    "Online" -> "2xx • Success"
-                    "Redirect" -> "3xx • Redirect"
-                    "Client error" -> "4xx • Client error"
-                    "Server error" -> "5xx • Server error"
-                    "Informational" -> "1xx • Informational"
-                    "Offline" -> "No HTTP response"
+                    "Online" -> "Online"
+                    "Redirect" -> "Redirect"
+                    "Client error" -> "Client error"
+                    "Server error" -> "Server error"
+                    "Informational" -> "Informational"
+                    "Offline" -> "Offline"
                     else -> "Not checked"
                 }
                 val statusColor = responseStatusColor(result)
-                val host = Uri.parse(entry.url).host ?: entry.url
-                Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
-                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(host, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        Text(entry.url, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-                        StateLine("Available", statusLabel, statusColor)
-                        if (result != null) {
-                            Text("General", fontWeight = FontWeight.Bold)
-                            DetailLine("FQDN", host)
-                            DetailLine("Page title", result.title.ifBlank { "Not fetched in headers-only health check" })
-                            DetailLine("Type", entry.category.replaceFirstChar { it.uppercase() })
-                            DetailLine("Slug / URL", entry.url)
-                            DetailLine("Enabled", "Enabled")
-                            DetailLine("Updated", formatIst(result.checkedAt))
-                            DetailLine("Last checked", formatIst(result.checkedAt))
-                            Text("HTTP Response", fontWeight = FontWeight.Bold)
-                            DetailLine("Status", result.responseCode?.toString() ?: "—")
-                            DetailLine("Fetched at", formatIst(result.checkedAt))
-                            DetailLine("Start URL", entry.url)
-                            DetailLine("Checked URL", result.finalUrl.ifBlank { entry.url })
-                            DetailLine("HTTP version", result.httpVersion)
-                            DetailLine("Error", result.error.ifBlank { "—" })
-                            Text("Fingerprint", fontWeight = FontWeight.Bold)
-                            DetailLine("Content type", result.contentType.ifBlank { "—" })
-                            DetailLine("Server", result.server.ifBlank { "—" })
-                            DetailLine("Set-Cookie present", result.setCookiePresent.toString())
-                            Text("Response Headers", fontWeight = FontWeight.Bold)
-                            if (result.headers.isEmpty()) DetailLine("Headers", "Not available")
-                            else result.headers.forEach { (name, value) ->
-                                DetailLine(name, if (name == "date" || name == "last-modified" || name == "expires") httpDateToIst(value) else value)
+                Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, statusColor.copy(alpha = 0.32f))) {
+                    Column(Modifier.fillMaxWidth().padding(13.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Text(entry.host, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(entry.url, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(shape = RoundedCornerShape(8.dp), color = statusColor.copy(alpha = 0.14f)) {
+                                Text(statusLabel, Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = statusColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                             }
-                            Text("Check detail: ${result.detail}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.width(8.dp))
+                            Text(result?.responseCode?.let { "HTTP $it" } ?: "No response code", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { selectedEntry = entry }) {
+                                Icon(Icons.Default.Assessment, null, Modifier.size(17.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("View report")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    selectedEntry?.let { entry ->
+        UrlReportDialog(
+            entry = entry,
+            result = health[entry.url],
+            onDismiss = { selectedEntry = null },
+            onCopy = { onCopy(entry.url) },
+            onOpen = { onOpen(entry.url) }
+        )
+    }
+}
+
+@Composable
+private fun UrlReportDialog(
+    entry: OnionEntry,
+    result: HealthResult?,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onOpen: () -> Unit
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().widthIn(max = 560.dp).heightIn(max = 760.dp),
+            shape = RoundedCornerShape(22.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 8.dp
+        ) {
+            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("URL detailed report", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                        Text(entry.host, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close report") }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                if (result == null) {
+                    Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                        DetailLine("URL", entry.url)
+                        DetailLine("Category", entry.category)
+                        DetailLine("Check status", "Not checked yet")
+                        Text("A detailed response report will appear here after this URL has been checked.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 12.dp, bottom = 12.dp))
+                    }
+                } else {
+                    Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("General", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 5.dp, bottom = 3.dp))
+                        DetailLine("FQDN / Host", entry.host)
+                        DetailLine("Page title", result.title.ifBlank { "Not fetched in headers-only health check" })
+                        DetailLine("Type / Category", entry.category)
+                        DetailLine("Slug / URL", entry.url)
+                        DetailLine("Enabled", "Enabled")
+                        DetailLine("Status", result.status)
+                        DetailLine("Updated", formatIst(result.checkedAt))
+                        DetailLine("Last checked", formatIst(result.checkedAt))
+                        Text("HTTP Response", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 10.dp, bottom = 3.dp))
+                        DetailLine("Response code", result.responseCode?.toString() ?: "No HTTP response code")
+                        DetailLine("Response status", result.responseCode?.let { statusForHttpCode(it) } ?: result.status)
+                        DetailLine("Fetched at", formatIst(result.checkedAt))
+                        DetailLine("Start URL", entry.url)
+                        DetailLine("Final / Checked URL", result.finalUrl.ifBlank { entry.url })
+                        DetailLine("HTTP version", result.httpVersion)
+                        DetailLine("Probe detail", result.detail)
+                        DetailLine("Error / Failure reason", result.error.ifBlank { "—" })
+                        Text("Response fingerprint", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 10.dp, bottom = 3.dp))
+                        DetailLine("Content type", result.contentType.ifBlank { "—" })
+                        DetailLine("Server", result.server.ifBlank { "—" })
+                        DetailLine("ETag", result.etag.ifBlank { "—" })
+                        DetailLine("Last-Modified", result.lastModified.ifBlank { "—" })
+                        DetailLine("Response Date", result.responseDate.ifBlank { "—" })
+                        DetailLine("Set-Cookie present", result.setCookiePresent.toString())
+                        Text("All captured response headers (${result.headers.size})", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 10.dp, bottom = 3.dp))
+                        if (result.headers.isEmpty()) {
+                            DetailLine("Response headers", "No headers received")
                         } else {
-                            Text("Run a live check to retrieve HTTP status and response headers. Page content is not downloaded in this fast check.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            result.headers.toSortedMap(String.CASE_INSENSITIVE_ORDER).forEach { (name, value) ->
+                                DetailLine(name, value)
+                            }
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { onCopy(entry.url) }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy") }
-                            Button(onClick = { onOpen(entry.url) }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.OpenInNew, null); Spacer(Modifier.width(6.dp)); Text("Open") }
-                        }
+                        Text("Header values are shown as received by the health checker. Sensitive header values, if returned by the server, are visible in this report.", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp))
+                    }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onCopy, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.ContentCopy, null)
+                        Spacer(Modifier.width(5.dp))
+                        Text("Copy URL")
+                    }
+                    Button(onClick = onOpen, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.OpenInNew, null)
+                        Spacer(Modifier.width(5.dp))
+                        Text("Open URL")
                     }
                 }
             }

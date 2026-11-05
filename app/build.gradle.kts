@@ -17,6 +17,23 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = providers.environmentVariable("RAASHUB_RELEASE_STORE_FILE").orNull?.let { file(it) }
+            storePassword = providers.environmentVariable("RAASHUB_RELEASE_STORE_PASSWORD").orNull
+            keyAlias = providers.environmentVariable("RAASHUB_RELEASE_KEY_ALIAS").orNull
+            keyPassword = providers.environmentVariable("RAASHUB_RELEASE_KEY_PASSWORD").orNull
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            // Release signing is supplied only by the protected GitHub Actions secrets.
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = false
+        }
+    }
+
     // Keep Java and Kotlin bytecode targets aligned for Gradle validation.
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

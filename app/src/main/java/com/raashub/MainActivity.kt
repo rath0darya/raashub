@@ -1574,6 +1574,15 @@ class HealthCheckService : Service() {
             .setProgress(total.coerceAtLeast(1), done.coerceIn(0, total.coerceAtLeast(1)), running && total <= 0)
             .build()
 
+    @androidx.annotation.RequiresApi(35)
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // Android 15 enforces a six-hour daily budget for dataSync foreground services.
+        // Chunk checkpoints remain committed; stop cleanly so the next scheduled run can resume.
+        update(lastProgress, lastProgress.coerceAtLeast(1), "Android background time limit reached. Completed chunks are saved; the next scheduled run will resume.", false)
+        stopForeground(STOP_FOREGROUND_DETACH)
+        stopSelf(startId)
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() {
         if (torBound) runCatching { unbindService(torServiceConnection) }

@@ -13,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 35
         // CI increments versionCode for every signed release so Android accepts in-place updates.
-        versionCode = providers.environmentVariable("RAASHUB_VERSION_CODE").orNull?.toIntOrNull() ?: 1
+        versionCode = 10000 + (providers.environmentVariable("RAASHUB_VERSION_CODE").orNull?.toIntOrNull() ?: 1)
         versionName = providers.environmentVariable("RAASHUB_VERSION_NAME").orNull ?: "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

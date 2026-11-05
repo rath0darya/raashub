@@ -2,6 +2,10 @@ package com.raashub
 
 import android.content.Intent
 import android.app.Activity
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.graphics.BitmapFactory
@@ -39,6 +43,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +64,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.json.JSONArray
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -768,45 +776,40 @@ private fun HubApp(sources: List<OnionEntry>) {
     var workerProgress by remember { mutableStateOf<List<WorkerProgress>>(emptyList()) }
     var activityLog by remember { mutableStateOf("Waiting for a scan to start.") }
     var lastBackPressed by remember { mutableLongStateOf(0L) }
-    val scope = rememberCoroutineScope()
     val runHealthChecks: () -> Unit = {
         if (!checking) {
             checking = true
             progressDone = 0
             progressTotal = sources.distinctBy { it.url.lowercase() }.size
-            (context as? MainActivity)?.showMonitoringNotification(0, progressTotal, false)
-            scope.launch {
-                try {
-                    val completedReport = checkOnionSources(sources, { done, total ->
-                        progressDone = done
-                        progressTotal = total
-                        (context as? MainActivity)?.showMonitoringNotification(done, total, false)
-                    }) { workers, log ->
-                        workerProgress = workers
-                        activityLog = log
-                    }
-                    healthReport = completedReport
-                    saveLatestHealthReport(context, completedReport)
-                    (context as? MainActivity)?.showMonitoringNotification(
-                        progressTotal, progressTotal, true,
-                        completedReport.message
-                    )
-                } catch (e: Exception) {
-                    // Never leave the Run button permanently disabled after a failed scan.
-                    val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
-                    val failure = HealthReport(false, null, "Scan failed: $reason", emptyMap())
-                    activityLog = (activityLog + "\nScan stopped: $reason").takeLast(12000)
-                    healthReport = failure
-                    saveLatestHealthReport(context, failure)
-                    Toast.makeText(context, failure.message, Toast.LENGTH_LONG).show()
-                    (context as? MainActivity)?.showMonitoringNotification(
-                        progressDone, progressTotal, true, failure.message
-                    )
-                } finally {
-                    checking = false
+            activityLog = "Starting background health-check service…"
+            val intent = Intent(context, HealthCheckService::class.java)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+                else context.startService(intent)
+            } catch (error: Exception) {
+                checking = false
+                val message = "Unable to start background scan: ${error.message ?: error.javaClass.simpleName}"
+                activityLog = message
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context?, intent: Intent?) {
+                if (intent?.action != HealthCheckService.ACTION_UPDATE) return
+                progressDone = intent.getIntExtra("done", progressDone)
+                progressTotal = intent.getIntExtra("total", progressTotal)
+                checking = intent.getBooleanExtra("running", false)
+                activityLog = intent.getStringExtra("log") ?: activityLog
+                if (!checking) {
+                    healthReport = loadLatestHealthReport(context)
+                    workerProgress = emptyList()
                 }
             }
         }
+        ContextCompat.registerReceiver(context, receiver, IntentFilter(HealthCheckService.ACTION_UPDATE), ContextCompat.RECEIVER_NOT_EXPORTED)
+        onDispose { runCatching { context.unregisterReceiver(receiver) } }
     }
     BackHandler(enabled = true) {
         when {
@@ -1299,4 +1302,91 @@ private fun Settings(report: HealthReport?, sourceCount: Int, darkMode: Boolean,
             }
         }
     }
+}
+
+
+/**
+ * Keeps a user-started URL scan independent from the Compose Activity lifecycle.
+ * The ongoing notification makes the long-running network work visible to Android.
+ */
+class HealthCheckService : Service() {
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val channelId = "raashub_background_health_check"
+    private val notificationId = 4108
+    @Volatile private var scanStarted = false
+    @Volatile private var lastProgress: Int = 0
+
+    override fun onCreate() {
+        super.onCreate()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel(channelId, "Background health check", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "Persistent progress for URL health checks"
+                    setShowBadge(false)
+                }
+            )
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (scanStarted) return START_STICKY
+        scanStarted = true
+        startForeground(notificationId, buildNotification(0, 0, "Preparing URL health check…", true))
+        serviceScope.launch {
+            try {
+                val array = JSONArray(assets.open("onion_sources.json").bufferedReader().use { it.readText() })
+                val sources = buildList {
+                    for (i in 0 until array.length()) {
+                        val item = array.optJSONObject(i) ?: continue
+                        val url = normalizeSourceUrl(item.optString("url")) ?: continue
+                        add(OnionEntry(url, item.optString("entity", "Unnamed source"), item.optString("source", "Source list"), item.optString("category", "other").lowercase()))
+                    }
+                }.distinctBy { it.url.lowercase() }
+                val total = sources.size
+                update(0, total, "Background scan started: 0/$total", true)
+                val report = checkOnionSources(sources, { done, count ->
+                    update(done, count, "Health check running: $done/$count (${if (count == 0) 0 else done * 100 / count}%)", true)
+                }) { workers, log ->
+                    val active = workers.count { it.status == "Checking" }
+                    update(lastProgress, total, "Active workers: $active • ${workers.size} worker slots", true, log)
+                }
+                saveLatestHealthReport(this@HealthCheckService, report)
+                update(total, total, "Completed: ${report.message}", false)
+            } catch (error: Exception) {
+                val reason = "Scan failed: ${error.message ?: error.javaClass.simpleName}"
+                saveLatestHealthReport(this@HealthCheckService, HealthReport(false, null, reason, emptyMap()))
+                update(lastProgress, lastProgress.coerceAtLeast(1), reason, false)
+            }
+            stopForeground(STOP_FOREGROUND_DETACH)
+            stopSelf(startId)
+        }
+        return START_STICKY
+    }
+
+    private fun update(done: Int, total: Int, message: String, running: Boolean, log: String = message) {
+        lastProgress = done
+        runCatching { getSystemService(NotificationManager::class.java).notify(notificationId, buildNotification(done, total, message, running)) }
+        sendBroadcast(Intent(ACTION_UPDATE).setPackage(packageName)
+            .putExtra("done", done).putExtra("total", total)
+            .putExtra("running", running).putExtra("log", log.takeLast(12000)))
+    }
+
+    private fun buildNotification(done: Int, total: Int, message: String, running: Boolean) =
+        NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.raashub_notification)
+            .setContentTitle(if (running) "RaaSHub is checking URLs" else "RaaSHub health check")
+            .setContentText(message.take(180))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setOngoing(running).setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setProgress(total.coerceAtLeast(1), done.coerceIn(0, total.coerceAtLeast(1)), running && total <= 0)
+            .build()
+
+    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onDestroy() {
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
+    companion object { const val ACTION_UPDATE = "com.raashub.HEALTH_CHECK_UPDATE" }
 }

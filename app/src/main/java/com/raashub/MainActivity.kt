@@ -323,7 +323,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val finalResults = results.toMap()
     val responded = finalResults.values.count { it.responseCode != null }
     val offline = finalResults.size - responded
-    val successful = finalResults.values.count { it.responseCode in 200..299 }
+    val successful = finalResults.values.count { result -> result.responseCode?.let { it in 200..299 } == true }
     val message = "Processed ${finalResults.size}/${allSources.size} URLs. Separate crawlers: ${clearWebSources.size} clear-web URLs checked directly; ${onionSources.size} onion URLs checked through Tor only. Concurrency: up to 64 direct + 64 Tor URL jobs, with HTTP/HTTPS probes capped at 256. Peak active URL jobs: ${peakActiveUrls.get()}. $responded responded ($successful successful 2xx); $offline had no HTTP response."
     return HealthReport(onionSources.isEmpty() || onionProxyPort != null, onionProxyPort, message, finalResults)
 }

@@ -1321,6 +1321,20 @@ private fun Settings(
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("Settings", fontSize = 26.sp, fontWeight = FontWeight.Bold) }
         item {
+            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f)), border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.24f))) {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Schedule, null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(9.dp))
+                        Text("Automatic health checks", fontWeight = FontWeight.SemiBold)
+                    }
+                    Text("Daily at 05:00 AM and 05:00 PM • Asia/Kolkata (IST)", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Text("Next run: ${HealthCheckScheduler.nextRunLabel()}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Exact timing depends on Android alarm access and device power settings. Interrupted scans keep completed chunks and resume from the saved checkpoint.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item {
             Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.38f))) {
                 Column(Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

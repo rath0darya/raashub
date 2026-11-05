@@ -181,7 +181,7 @@ private fun loadLatestHealthReport(context: android.content.Context): HealthRepo
         headersObject.keys().forEach { key -> headers[key] = headersObject.optString(key) }
         val code = if (item.isNull("responseCode")) null else item.optInt("responseCode")
         results[item.optString("url")] = HealthResult(
-            status = item.optString("status", "Offline").takeIf { it in setOf("Online", "Redirect", "Client error", "Server error", "Informational") } ?: "Offline",
+            status = item.optString("status", "Unconfirmed").takeIf { it in setOf("Online", "Redirect", "Protected", "Client error", "Server error", "Informational", "Unconfirmed") } ?: "Unconfirmed",
             detail = item.optString("detail").ifBlank { "Offline" },
             checkedAt = item.optLong("checkedAt"), responseCode = code,
             httpVersion = item.optString("httpVersion", "—"), finalUrl = item.optString("finalUrl"),
@@ -277,8 +277,8 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
             return
         }
         // Deterministic, non-overlapping chunks: each crawler owns its own URL set.
-        // Chunk size is derived so each direct/onion crawler has at most 100 chunks.
-        val chunkSize = kotlin.math.ceil(entries.size / 100.0).toInt().coerceAtLeast(1)
+        // Process at most 100 URLs per chunk. Every chunk is committed before the next starts.
+        val chunkSize = 100
         val chunks = entries.distinctBy { it.url.trim().lowercase() }.chunked(chunkSize)
         chunks.forEachIndexed { chunkIndex, chunkEntries ->
             val effectiveSlotCount = minOf(slotCount, chunkEntries.size).coerceAtLeast(1)
@@ -301,7 +301,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                                     checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
                                 } catch (e: Exception) {
                                     val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
-                                    HealthResult("Offline", "No HTTP response", System.currentTimeMillis(), finalUrl = entry.url, error = reason)
+                                    HealthResult("Unconfirmed", "No response after retry policy", System.currentTimeMillis(), finalUrl = entry.url, error = reason)
                                 }
                                 results.putIfAbsent(entry.url, result)
                                 publishWorker(workerId, result.status, entry.url, "$workerId finished: ${result.status} — ${result.detail}")
@@ -358,7 +358,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                 if (proxyPort == null && onionSources.isNotEmpty()) "Tor unavailable" else "Tor ready",
                 if (proxyPort == null) "No Tor route; clear-web continues independently" else "SOCKS port $proxyPort",
                 log = if (proxyPort == null && onionSources.isNotEmpty())
-                    "No Tor SOCKS listener was found; onion results will show Offline. Clear-web crawler is not affected."
+                    "No Tor SOCKS listener was found; onion results will be marked Unconfirmed, not Offline. Clear-web crawler is not affected."
                 else "Tor SOCKS listener found; onion-only crawler starting."
             )
             runCrawler("Onion crawler", onionSources, onionSlots, proxyPort)
@@ -424,6 +424,20 @@ private fun findTorSocksProxy(): Int? {
 }
 
 private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDispatcher: CoroutineDispatcher): HealthResult {
+    suspend fun probeWithRetry(target: String): HealthResult {
+        var last = HealthResult("Unconfirmed", "No HTTP response", System.currentTimeMillis(), finalUrl = target)
+        // Slow hosts and Tor circuits get one longer retry. HTTP responses (including
+        // CAPTCHA/403/429 challenges) are real reachability signals and are not retried.
+        val deadlines = intArrayOf(15000, 25000)
+        deadlines.forEachIndexed { index, timeout ->
+            last = kotlinx.coroutines.withContext(networkDispatcher) {
+                checkOneOnionAttempt(target, proxyPort, timeout)
+            }
+            if (last.responseCode != null) return last
+            if (index < deadlines.lastIndex) kotlinx.coroutines.delay(900L * (index + 1))
+        }
+        return last.copy(status = "Unconfirmed", detail = "No HTTP response after retry", error = last.error.ifBlank { "No response after 2 attempts" })
+    }
     val uri = Uri.parse(urlText)
     val scheme = (uri.scheme ?: "http").lowercase()
     val alternate = if (scheme == "https") "http" else "https"
@@ -432,9 +446,7 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
 
     // A responding primary endpoint is enough for an availability check.
     // Only spend time on the alternate protocol when the declared one fails.
-    val primary = kotlinx.coroutines.withContext(networkDispatcher) {
-        checkOneOnionAttempt(primaryUrl, proxyPort, 7000)
-    }
+    val primary = probeWithRetry(primaryUrl)
     if (primary.responseCode != null) {
         val headers = linkedMapOf<String, String>().apply {
             putAll(primary.headers)
@@ -444,9 +456,7 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
         return primary.copy(headers = headers, detail = "${scheme.uppercase()}: HTTP ${primary.responseCode}")
     }
 
-    val fallback = kotlinx.coroutines.withContext(networkDispatcher) {
-        checkOneOnionAttempt(alternateUrl, proxyPort, 7000)
-    }
+    val fallback = probeWithRetry(alternateUrl)
     val selected = if (fallback.responseCode != null) fallback else primary
     val headers = linkedMapOf<String, String>().apply {
         putAll(selected.headers)
@@ -459,7 +469,7 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
             listOf(primary.error, fallback.error).filter { it.isNotBlank() }.distinct().joinToString("; ").ifBlank { "No HTTP response" },
         finalUrl = selected.finalUrl.ifBlank { if (reachable) alternateUrl else primaryUrl },
         headers = headers,
-        status = selected.responseCode?.let(::statusForHttpCode) ?: "Offline",
+        status = selected.responseCode?.let { statusForHttpResponse(it, selected.headers) } ?: "Unconfirmed",
         error = if (reachable) "" else listOf(primary.error, fallback.error).filter { it.isNotBlank() }.distinct().joinToString("; ").ifBlank { selected.error }
     )
 }
@@ -470,7 +480,19 @@ private fun statusForHttpCode(code: Int): String = when (code) {
     in 300..399 -> "Redirect"
     in 400..499 -> "Client error"
     in 500..599 -> "Server error"
-    else -> "Offline"
+    else -> "Unconfirmed"
+}
+
+private fun statusForHttpResponse(code: Int, headers: Map<String, String>): String {
+    val normalized = headers.mapKeys { it.key.lowercase() }.mapValues { it.value.lowercase() }
+    val challengeSignal = normalized.keys.any { key ->
+        key.contains("captcha") || key.contains("challenge") || key.startsWith("cf-")
+    } || normalized["cf-mitigated"] == "challenge" ||
+        normalized["server"].orEmpty().contains("cloudflare") ||
+        normalized["x-sucuri-block"].orEmpty().isNotBlank()
+    return if (code in setOf(401, 403, 429) || (code == 503 && challengeSignal) || challengeSignal) {
+        "Protected"
+    } else statusForHttpCode(code)
 }
 
 private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs: Int): HealthResult {
@@ -555,7 +577,7 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
                 val contentType = headers["content-type"].orEmpty()
                 val server = headers["server"].orEmpty()
                 val detail = "HTTP $code • ${if (code in 200..399) "responded" else "server responded"}"
-                val status = statusForHttpCode(code)
+                val status = statusForHttpResponse(code, headers)
                 HealthResult(
                     status = status, detail = detail, checkedAt = checkedAt, responseCode = code,
                     httpVersion = httpVersion, finalUrl = urlText, title = title,
@@ -1083,6 +1105,8 @@ private fun responseStatusColor(result: HealthResult?): Color = when {
     result.responseCode?.let { it in 100..199 } == true -> Color(0xFF4DA6FF)
     result.responseCode?.let { it in 200..299 } == true -> Color(0xFF19B77A)
     result.responseCode?.let { it in 300..399 } == true -> Color(0xFF8B7CFF)
+    result.status == "Protected" -> Color(0xFFFFB547)
+    result.status == "Unconfirmed" -> Color(0xFF8792A2)
     result.responseCode?.let { it in 400..499 } == true -> Color(0xFFFFB547)
     result.responseCode?.let { it in 500..599 } == true -> Color(0xFFFF5D67)
     else -> Color(0xFF8792A2)
@@ -1139,7 +1163,9 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
                     "Redirect" -> "Redirect"
                     "Client error" -> "Client error"
                     "Server error" -> "Server error"
+                    "Protected" -> "Protected / CAPTCHA"
                     "Informational" -> "Informational"
+                    "Unconfirmed" -> "Unconfirmed"
                     "Offline" -> "Offline"
                     else -> "Not checked"
                 }
@@ -1557,22 +1583,27 @@ class HealthCheckService : Service() {
                     checkpoint.edit().putBoolean("active", true).putString("completed_urls", "[]")
                         .putLong("started_at", System.currentTimeMillis()).commit()
                 }
-                // RaaSHub Priority Queue v1: offline first, then never-checked, then stale/error,
-                // then redirects, then healthy endpoints. Oldest checks win within each tier.
-                val rankedSources = sources.sortedWith(
-                    compareBy<OnionEntry> { entry ->
-                        val prior = previousReport?.results?.get(entry.url)
-                        when {
-                            prior == null -> 1
-                            prior.responseCode == null -> 0
-                            prior.status == "Server error" || prior.status == "Client error" -> 2
-                            prior.status == "Redirect" -> 3
-                            else -> 4
-                        }
-                    }.thenBy { entry ->
-                        previousReport?.results?.get(entry.url)?.checkedAt ?: 0L
-                    }.thenBy { it.url.lowercase() }
-                )
+                // RaaSHub Group Priority Queue v2: preserve each source group and rank URLs
+                // inside that group. Online first, redirects second, protected/challenge
+                // responses third, other HTTP responses/never checked next, no-response last.
+                val rankedSources = sources.groupBy { it.entity.trim().ifBlank { it.host } }
+                    .toSortedMap(String.CASE_INSENSITIVE_ORDER)
+                    .values.flatMap { groupEntries ->
+                        groupEntries.sortedWith(
+                            compareBy<OnionEntry> { entry ->
+                                val prior = previousReport?.results?.get(entry.url)
+                                when {
+                                    prior?.status == "Online" -> 0
+                                    prior?.status == "Redirect" -> 1
+                                    prior?.status == "Protected" -> 2
+                                    prior == null -> 3
+                                    prior.responseCode != null -> 3
+                                    else -> 4
+                                }
+                            }.thenBy { previousReport?.results?.get(it.url)?.checkedAt ?: 0L }
+                                .thenBy { it.url.lowercase() }
+                        )
+                    }
                 val pendingSources = rankedSources.filterNot { it.url.lowercase() in completedUrls }
                 val total = sources.size
                 val resumedCount = completedUrls.size.coerceAtMost(total)

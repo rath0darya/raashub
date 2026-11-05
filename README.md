@@ -1,54 +1,85 @@
-# RaaSHub for Android
+<div align="center">
+  <img src="https://raw.githubusercontent.com/rath0darya/raashub/main/assets/images/raashub-logo.png" alt="RaaSHub" width="148" />
+  <h1>RaaSHub</h1>
+  <p><strong>Native Android · Onion source directory · Live availability checks</strong></p>
+  <p>
+    <a href="https://github.com/rath0darya/raashub/actions/workflows/android-apk.yml"><img src="https://github.com/rath0darya/raashub/actions/workflows/android-apk.yml/badge.svg?branch=main" alt="Android build" /></a>
+    <a href="https://github.com/rath0darya/raashub/releases/latest"><img src="https://img.shields.io/github/v/release/rath0darya/raashub?display_name=tag" alt="Latest release" /></a>
+    <a href="https://github.com/rath0darya/raashub/releases/latest"><img src="https://img.shields.io/github/downloads/rath0darya/raashub/total" alt="Downloads" /></a>
+    <img src="https://img.shields.io/badge/Android-26%2B-3DDC84?logo=android&logoColor=white" alt="Android 26+" />
+    <img src="https://img.shields.io/badge/Kotlin-Jetpack%20Compose-7F52FF?logo=kotlin&logoColor=white" alt="Kotlin and Jetpack Compose" />
+  </p>
+  <p><a href="https://github.com/rath0darya/raashub/releases/latest"><strong>⬇ Download RaaSHub.apk</strong></a> · <a href="https://github.com/rath0darya/raashub/releases">All releases</a> · <a href="https://github.com/rath0darya/raashub/actions">Build status</a></p>
+</div>
 
-RaaSHub is a **native Android app built with Kotlin and Jetpack Compose**. This repository is focused on the Android app, its bundled directory data, and APK build workflow. It does not contain a website frontend or a Node.js app runtime.
+---
 
-## App details
+<table>
+  <tr>
+    <td align="center" width="25%"><strong>⌕ Search</strong><br/>Find sources and URLs</td>
+    <td align="center" width="25%"><strong>◈ Directory</strong><br/>Browse grouped sources</td>
+    <td align="center" width="25%"><strong>◎ Monitor</strong><br/>Check HTTP availability</td>
+    <td align="center" width="25%"><strong>◐ Themes</strong><br/>Dark and light modes</td>
+  </tr>
+</table>
 
-- **App name:** RaaSHub
-- **Android application ID:** `com.raashub`
-- **UI framework:** Kotlin + Jetpack Compose
-- **Main screen source:** `app/src/main/java/com/raashub/MainActivity.kt`
-- **Canonical directory dataset:** `data/directory.json`
-- **Build-time source index generator:** `scripts/build_android_source_index.py`
-- **APK destination:** `Download/RaaSHub.apk`
-- **APK workflow:** [Build RaaSHub Android APK](.github/workflows/android-apk.yml)
-- **Original logo:** `assets/images/raashub-logo.png`
+## App
 
-## Native app and current capabilities
+RaaSHub is a **native Android application** built with Kotlin and Jetpack Compose. It organizes onion and clear-web source links, lets you search and browse source groups, and checks availability without downloading page content.
 
-The app uses native Android Compose UI. It does not use a WebView for its interface and does not require Node.js, JavaScript, Python, or Termux at runtime. JSON files hold directory data; the Python script is only a build-time utility that prepares the bundled source index.
+| | |
+|---|---|
+| **Package ID** | `com.raashub` |
+| **Platform** | Android 8.0+ (API 26+) |
+| **UI** | Kotlin · Jetpack Compose · Material 3 |
+| **Network** | Direct HTTP/HTTPS for clear-web URLs; Tor SOCKS for `.onion` URLs |
+| **Navigation** | Home · Sources · Activity · Settings |
+| **Data** | Bundled offline source index; latest scan saved locally |
 
-The current interface provides an overview, searchable source groups, all URLs within each group, copy/open actions, live health-check results grouped by source, an activity screen, and system-adaptive light/dark appearance. The source index generator scans retained JSON, TXT, and CSV files, normalizes and deduplicates onion URLs, and groups URLs by their source entity. File paths are kept out of the user-facing screens.
+## Screens & features
 
-The app bundles the Guardian Project Tor Android runtime and starts it automatically for onion health checks. A source result reflects only the moment checked; it does not certify a site's trustworthiness or safety. The app checks up to 10 URLs per run and does not claim to route all device traffic through Tor.
+- **Home** — source totals, latest scan snapshot and quick actions.
+- **Sources** — searchable, category-filtered source groups with copy/open actions.
+- **Activity** — live progress, worker activity, HTTP response classes and previous scan results.
+- **Settings** — dark/light appearance, notification controls and routing information.
+- **Scanner** — independent direct and Tor-only onion crawlers, parallel HTTP/HTTPS probes, bounded queues and response-header limits.
+- **Privacy** — no external CTI backend is required; no device-wide traffic routing is claimed.
 
-## Build the debug APK
+## Download
 
-The GitHub Actions workflow installs the Android SDK, generates the source index, installs the original logo, builds the debug APK, checks that the APK is non-empty, copies it to `Download/RaaSHub.apk`, uploads the `RaaSHub-Android-APK` artifact, and attempts to commit the APK to the repository.
+<div align="center">
+  <a href="https://github.com/rath0darya/raashub/releases/latest">
+    <img src="https://img.shields.io/badge/Download-RaaSHub.apk-FF2D95?style=for-the-badge&logo=android&logoColor=white" alt="Download RaaSHub APK" />
+  </a>
+  <p><sub>Install the APK from the latest GitHub Release. Allow installation from your chosen browser or file manager when Android asks.</sub></p>
+</div>
 
-To build locally with Android Studio or Gradle:
+## Build
 
-1. Install Android Studio and a compatible JDK 17.
-2. Open this repository as a Gradle project.
-3. Ensure Android SDK Platform 35 and Build Tools 35.0.0 are installed.
-4. Run `gradle assembleDebug` from the repository root.
-5. Find the generated APK at `app/build/outputs/apk/debug/app-debug.apk`.
+GitHub Actions validates the source dataset, generates Android launcher resources, runs unit tests, builds a signed release APK, verifies its signature and package ID, and publishes the release asset as `RaaSHub.apk`.
 
-The CI build previously exposed a JVM-target mismatch (Java defaulted to 1.8 while Kotlin targeted 17). The Gradle configuration now explicitly aligns Java and Kotlin targets to **17**. Check the latest [GitHub Actions run](https://github.com/rath0darya/raashub/actions) for the current result. An APK is only confirmed when the workflow completes successfully and verifies `Download/RaaSHub.apk`.
+| Secret | Purpose |
+|---|---|
+| `KEYSTORE_BASE64` | Base64-encoded persistent release keystore |
+| `KEYSTORE_PASSWORD` | Keystore password |
+| `KEY_ALIAS` | Signing key alias |
+| `KEY_PASSWORD` | Signing key password |
 
-## Package ID, signing and updates
+The signing key must remain the same for every update. **Never commit the keystore or passwords.**
 
-The package ID is `com.raashub`. This must remain stable for compatible updates. The workflow currently produces a **debug/testing APK**, not a production-signed release. Android will only accept an in-place update when the application ID and signing certificate match the installed app. For production releases, configure a persistent private release keystore; never commit the private signing key to this repository.
+## Source layout
 
-## Repository layout
+| Path | Purpose |
+|---|---|
+| `app/` | Native Android application |
+| `data/directory.json` | Canonical source directory |
+| `data/groups/` | Additional source records |
+| `scripts/` | Data validation and source-index generation |
+| `assets/images/` | RaaSHub brand artwork |
+| `.github/workflows/` | CI, signed APK and archive workflows |
 
-- `app/` — native Android source and resources
-- `assets/` — original app logo
-- `data/` — retained source datasets
-- `scripts/build_android_source_index.py` — build-time source index generation
-- `.github/workflows/android-apk.yml` — APK build workflow
-- `.github/workflows/unpack-repository.yml` — guarded archive extraction workflow (only runs when the archive is present)
+## Safety
 
-## Footer
+A successful HTTP response only indicates that a server responded at check time. It does **not** establish that a source is trustworthy, safe, legal or free of malware. Onion URLs are checked through Tor only; clear-web URLs use the device's direct network connection.
 
-Developed With ♥️ AnonVox
+<div align="center"><sub>Built with Kotlin & Jetpack Compose · RaaSHub · AnonVox</sub></div>

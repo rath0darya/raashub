@@ -1,7 +1,10 @@
 # Native Android build notes
 
-The Android project uses application ID `com.raashub` and is built by `.github/workflows/android-apk.yml`.
+- Application ID: `com.raashub`
+- UI: Kotlin + Jetpack Compose + Material 3
+- Build workflow: `.github/workflows/android-apk.yml`
+- Release asset: `RaaSHub.apk`
+- Source index: generated from `data/` during CI; do not hand-edit generated assets.
+- Release signing: persistent GitHub Actions secrets; never commit the keystore.
 
-The CI job derives `onion_sources.json` from the repository's `data/` files during each build and copies the repository's existing RaaSHub logo into Android drawable resources. These generated assets are intentionally not hand-maintained lists.
-
-The first CI APK is a debug/testing build. It must not be treated as a signed production release.
+The CI pipeline validates source records, builds and tests the app, verifies the release APK signature and package ID, refreshes `Download/RaaSHub.apk`, and publishes the signed APK. GitHub provides ZIP and TAR.GZ source archives for each release tag.

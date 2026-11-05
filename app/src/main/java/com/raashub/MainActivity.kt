@@ -77,6 +77,7 @@ import java.nio.charset.StandardCharsets
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 private fun normalizeSourceUrl(raw: String): String? {
     var value = raw.trim().trimEnd('.', ',', ';', ')')
@@ -89,8 +90,12 @@ private fun normalizeSourceUrl(raw: String): String? {
     if (!value.startsWith("http://", true) && !value.startsWith("https://", true)) {
         value = "http://$value"
     }
+    if (value.any { it.isWhitespace() || it.code < 0x20 || it.code == 0x7f }) return null
     val parsed = Uri.parse(value)
-    if (parsed.host.isNullOrBlank() || parsed.scheme?.lowercase() !in setOf("http", "https")) return null
+    val host = parsed.host?.lowercase() ?: return null
+    if (parsed.scheme?.lowercase() !in setOf("http", "https")) return null
+    if (parsed.encodedAuthority?.contains("@") == true) return null
+    if (host.endsWith(".onion") && !Regex("^[a-z2-7]{56}\\.onion$").matches(host)) return null
     return value
 }
 
@@ -138,7 +143,7 @@ private fun saveLatestHealthReport(context: android.content.Context, report: Hea
         val results = org.json.JSONArray()
         report.results.forEach { (url, result) ->
             val headers = org.json.JSONObject()
-            result.headers.forEach { (key, value) -> headers.put(key, value) }
+            result.headers.entries.take(24).forEach { (key, value) -> headers.put(key, value.take(512)) }
             results.put(org.json.JSONObject()
                 .put("url", url).put("status", result.status).put("detail", result.detail)
                 .put("checkedAt", result.checkedAt).put("responseCode", result.responseCode ?: org.json.JSONObject.NULL)
@@ -229,14 +234,25 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val peakActiveUrls = AtomicInteger(0)
     val results = java.util.concurrent.ConcurrentHashMap<String, HealthResult>()
     val liveWorkers = java.util.concurrent.ConcurrentHashMap<String, WorkerProgress>()
-    val liveLog = java.util.concurrent.CopyOnWriteArrayList<String>()
+    val liveLog = java.util.concurrent.ConcurrentLinkedDeque<String>()
+    val lastWorkerUiUpdate = AtomicLong(0L)
+    val lastProgressUiUpdate = AtomicLong(0L)
 
     suspend fun publishWorker(id: String, status: String, url: String = "", log: String) {
         liveWorkers[id] = WorkerProgress(id, status, url)
-        liveLog.add("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}  $log")
-        while (liveLog.size > 80) liveLog.removeAt(0)
-        val snapshot = liveWorkers.values.sortedBy { it.id }
-        withContext(Dispatchers.Main) { onWorkerUpdate(snapshot, liveLog.joinToString("\n")) }
+        liveLog.addLast("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}  $log")
+        while (liveLog.size > 80) liveLog.pollFirst()
+        val now = System.currentTimeMillis()
+        val urgent = status in setOf("Tor unavailable", "Tor ready", "Completed", "Failed")
+        while (true) {
+            val previous = lastWorkerUiUpdate.get()
+            if (!urgent && now - previous < 250L) break
+            if (lastWorkerUiUpdate.compareAndSet(previous, now)) {
+                val snapshot = liveWorkers.values.sortedBy { it.id }
+                withContext(Dispatchers.Main) { onWorkerUpdate(snapshot, liveLog.joinToString("\n")) }
+                break
+            }
+        }
     }
 
     suspend fun runCrawler(
@@ -249,12 +265,18 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
             publishWorker(crawlerName, "Idle", log = "$crawlerName has no URLs assigned")
             return
         }
-        val queue = Channel<OnionEntry>(Channel.UNLIMITED)
-        entries.forEach { queue.trySend(it).getOrThrow() }
-        queue.close()
+        val effectiveSlotCount = minOf(slotCount, entries.size).coerceAtLeast(1)
+        val queue = Channel<OnionEntry>(capacity = effectiveSlotCount * 2)
 
         coroutineScope {
-            val slots = (0 until slotCount).map { slotIndex ->
+            val producer = launch {
+                try {
+                    entries.forEach { queue.send(it) }
+                } finally {
+                    queue.close()
+                }
+            }
+            val slots = (0 until effectiveSlotCount).map { slotIndex ->
                 launch {
                     val workerId = "$crawlerName · Slot ${slotIndex + 1}"
                     publishWorker(workerId, "Waiting", log = "$workerId ready")
@@ -274,11 +296,18 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                         } finally {
                             activeUrls.decrementAndGet()
                             val done = completed.incrementAndGet()
-                            withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
+                            val now = System.currentTimeMillis()
+                            val previous = lastProgressUiUpdate.get()
+                            if (done == allSources.size || now - previous >= 250L) {
+                                if (lastProgressUiUpdate.compareAndSet(previous, now) || done == allSources.size) {
+                                    withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
+                                }
+                            }
                         }
                     }
                 }
             }
+            producer.join()
             slots.joinAll()
         }
     }
@@ -320,6 +349,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
         onionJob.join()
     }
 
+    publishWorker("Scan", "Completed", log = "Scan completed: ${completed.get()} URLs processed.")
     val finalResults = results.toMap()
     val responded = finalResults.values.count { it.responseCode != null }
     val offline = finalResults.size - responded
@@ -394,11 +424,14 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
     }
     val candidates = listOf(primary, alternateResult)
     val selected = candidates.maxByOrNull { result ->
+        val code = result.responseCode
         when {
-            result.responseCode != null && result.responseCode in 200..399 -> 5
-            result.responseCode != null && result.responseCode in 400..499 -> 4
-            result.responseCode != null -> 3
-            result.error.contains("TLS/HTTPS handshake failed", true) -> 1
+            code == null -> if (result.error.contains("TLS/HTTPS handshake failed", true)) 1 else 0
+            code in 200..299 -> 7
+            code in 300..399 -> 6
+            code in 500..599 -> 5
+            code in 400..499 -> 4
+            code in 100..199 -> 3
             else -> 0
         }
     } ?: primary
@@ -478,7 +511,9 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
             active.use { connection ->
                 connection.soTimeout = readTimeoutMs
                 val path = (uri.encodedPath?.takeIf { it.isNotEmpty() } ?: "/") + (uri.encodedQuery?.let { "?$it" } ?: "")
-                val request = "GET $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: RaaSHub-HealthCheck/1.0\r\nRange: bytes=0-32767\r\nConnection: close\r\n\r\n"
+                val defaultPort = if (scheme == "https") 443 else 80
+                val hostHeader = if (port == defaultPort) host else "$host:$port"
+                val request = "GET $path HTTP/1.1\r\nHost: $hostHeader\r\nUser-Agent: RaaSHub-HealthCheck/1.1\r\nRange: bytes=0-0\r\nConnection: close\r\n\r\n"
                 connection.getOutputStream().write(request.toByteArray(StandardCharsets.ISO_8859_1))
                 connection.getOutputStream().flush()
                 val reader = BufferedReader(InputStreamReader(connection.getInputStream(), StandardCharsets.ISO_8859_1))
@@ -488,14 +523,19 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
                 val httpVersion = "HTTP/${match.groupValues[1]}"
                 val code = match.groupValues[2].toInt()
                 val headers = linkedMapOf<String, String>()
+                var headerBytes = 0
+                var headerCount = 0
                 while (true) {
                     val line = reader.readLine() ?: break
+                    headerBytes += line.length + 2
+                    headerCount++
+                    if (headerBytes > 65536 || headerCount > 100) throw IOException("HTTP response headers exceed the safety limit")
                     if (line.isEmpty()) break
                     val split = line.indexOf(':')
-                    if (split > 0) {
+                    if (split > 0 && headers.size < 40) {
                         val name = line.substring(0, split).trim().lowercase()
-                        val value = line.substring(split + 1).trim()
-                        headers[name] = if (headers.containsKey(name)) headers.getValue(name) + ", " + value else value
+                        val value = line.substring(split + 1).trim().take(2048)
+                        headers[name] = if (headers.containsKey(name)) (headers.getValue(name) + ", " + value).take(2048) else value
                     }
                 }
                 // Fast health-check mode reads response headers only. Avoid downloading
@@ -803,11 +843,13 @@ private fun HubApp(sources: List<OnionEntry>) {
         ) { inset ->
             Column(
                 Modifier.fillMaxSize()
-                    .background(Brush.linearGradient(listOf(
-                        MaterialTheme.colorScheme.background,
-                        if (darkMode) Color(0xFF0A0A0A) else Color(0xFF0A0A0A),
-                        if (darkMode) Color(0xFF101018) else Color(0xFF101018)
-                    )))
+                    .background(
+                        if (darkMode) Brush.linearGradient(listOf(
+                            Color(0xFF0A0A0A), Color(0xFF0D111B), Color(0xFF101018)
+                        )) else Brush.linearGradient(listOf(
+                            Color(0xFFF8F7FA), Color(0xFFF1F7FB), Color(0xFFFFF5FA)
+                        ))
+                    )
                     .padding(inset)
             ) {
                 Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(
@@ -820,11 +862,11 @@ private fun HubApp(sources: List<OnionEntry>) {
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text("RaaSHub", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
-                            Text("CYBER THREAT INTELLIGENCE", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, letterSpacing = 1.2.sp)
+                            Text("ONION SOURCE DIRECTORY", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, letterSpacing = 1.2.sp)
                         }
                     }
                     Spacer(Modifier.height(16.dp))
-                    Text("Know your threat landscape.", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                    Text("Explore sources. Check availability.", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                 }
                 when {
                     selected != null -> Detail(selected!!, healthReport?.results.orEmpty(), onBack = { selected = null }, onCopy = { url ->
@@ -856,14 +898,14 @@ private fun Home(sources: List<OnionEntry>, checking: Boolean, report: HealthRep
                 Column(Modifier.padding(18.dp)) {
                     Text("Intelligence snapshot", fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
-                    StateLine("Live onion availability", report?.let { "${it.results.size} checked" } ?: "Not checked", MaterialTheme.colorScheme.onSurfaceVariant)
+                    StateLine("Live source availability", report?.let { "${it.results.size} checked" } ?: "Not checked", MaterialTheme.colorScheme.onSurfaceVariant)
                     StateLine("Network route", when { checking -> "Checking…"; report?.torAvailable == true -> "Connected"; report != null -> "Unavailable"; else -> "Not checked" }, MaterialTheme.colorScheme.onSurfaceVariant)
                     if (report?.torAvailable == false) Text("Live checks unavailable", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(10.dp))
                     Button(onClick = onRunChecks, enabled = !checking && sources.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
                         if (checking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.NetworkCheck, null)
                         Spacer(Modifier.width(8.dp))
-                        Text(if (checking) "Checking all onion URLs…" else "Check all onion URLs")
+                        Text(if (checking) "Checking all onion URLs…" else "Check all sources")
                     }
                 }
             }
@@ -1025,12 +1067,12 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
                             DetailLine("Slug / URL", entry.url)
                             DetailLine("Enabled", "Enabled")
                             DetailLine("Updated", formatIst(result.checkedAt))
-                            DetailLine("Last scrape", formatIst(result.checkedAt))
+                            DetailLine("Last checked", formatIst(result.checkedAt))
                             Text("HTTP Response", fontWeight = FontWeight.Bold)
                             DetailLine("Status", result.responseCode?.toString() ?: "—")
                             DetailLine("Fetched at", formatIst(result.checkedAt))
                             DetailLine("Start URL", entry.url)
-                            DetailLine("Final URL", result.finalUrl.ifBlank { entry.url })
+                            DetailLine("Checked URL", result.finalUrl.ifBlank { entry.url })
                             DetailLine("HTTP version", result.httpVersion)
                             DetailLine("Error", result.error.ifBlank { "—" })
                             Text("Fingerprint", fontWeight = FontWeight.Bold)

@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 DIRECTORY = DATA / "directory.json"
 OUT = ROOT / "app" / "src" / "main" / "assets" / "onion_sources.json"
-URL_RE = re.compile(r"""(?i)(?:https?://)?[a-z2-7]{16,56}\.onion(?:/[^\s"'<>\\]*)?""")
+URL_RE = re.compile(r"""(?i)(?:https?://)?[a-z2-7]{56}\.onion(?:/[^\s"'<>\\]*)?""")
 GROUP_RE = re.compile(r'"(?:group|name|title)"\s*:\s*"([^"]+)"', re.I)
 records = {}
 
@@ -29,7 +29,12 @@ def normalize_url(raw):
     parsed = urlsplit(raw)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return None
-    if not parsed.hostname:
+    host = parsed.hostname.lower()
+    if host.endswith(".onion") and not re.fullmatch(r"[a-z2-7]{56}\\.onion", host):
+        return None
+    if any(ch.isspace() or ord(ch) < 32 for ch in raw):
+        return None
+    if parsed.username is not None or parsed.password is not None:
         return None
     return raw
 

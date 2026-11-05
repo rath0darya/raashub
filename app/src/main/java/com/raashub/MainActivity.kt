@@ -949,7 +949,12 @@ private fun HubApp(sources: List<OnionEntry>) {
                     tab == Tab.HOME -> Home(sources, checking, healthReport, runHealthChecks) { tab = Tab.SOURCES }
                     tab == Tab.SOURCES -> Sources(sources, search, { search = it }, sourceFilter, { sourceFilter = it }, healthReport?.results.orEmpty()) { selected = it }
                     tab == Tab.ACTIVITY -> Activity(sources, checking, healthReport, progressDone, progressTotal, workerProgress, activityLog, runHealthChecks)
-                    else -> Settings(healthReport, sources.size, darkMode, { enabled -> darkMode = enabled; themePrefs.edit().putBoolean("dark_mode", enabled).apply() }) { (context as? MainActivity)?.openNotificationSettings() } 
+                    else -> Settings(
+                        healthReport, sources.size, darkMode,
+                        { enabled -> darkMode = enabled; themePrefs.edit().putBoolean("dark_mode", enabled).apply() },
+                        onNotificationSettings = { (context as? MainActivity)?.openNotificationSettings() },
+                        onBackgroundSettings = { (context as? MainActivity)?.openBackgroundSettings() }
+                    ) 
                 }
             }
         }
@@ -1301,8 +1306,17 @@ private fun SkeletonSourceCard() {
 }
 
 @Composable
-private fun Settings(report: HealthReport?, sourceCount: Int, darkMode: Boolean, onDarkModeChange: (Boolean) -> Unit, onNotificationSettings: () -> Unit) {
+private fun Settings(
+    report: HealthReport?, sourceCount: Int, darkMode: Boolean,
+    onDarkModeChange: (Boolean) -> Unit,
+    onNotificationSettings: () -> Unit,
+    onBackgroundSettings: () -> Unit
+) {
     val context = LocalContext.current
+    val backgroundAllowed = remember {
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
+    }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("Settings", fontSize = 26.sp, fontWeight = FontWeight.Bold) }
         item {
@@ -1329,6 +1343,16 @@ private fun Settings(report: HealthReport?, sourceCount: Int, darkMode: Boolean,
                             Text("Get start, progress and completion updates while URL checks run.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         TextButton(onClick = onNotificationSettings) { Text("Manage") }
+                    }
+                    HorizontalDivider(Modifier.padding(vertical = 14.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.BatteryChargingFull, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(26.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Background execution", fontWeight = FontWeight.SemiBold)
+                            Text(if (backgroundAllowed) "Unrestricted battery use is allowed." else "Battery optimization may pause long-running scans. Enable unrestricted use in Android settings.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(onClick = onBackgroundSettings) { Text(if (backgroundAllowed) "Manage" else "Enable") }
                     }
                     HorizontalDivider(Modifier.padding(vertical = 14.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {

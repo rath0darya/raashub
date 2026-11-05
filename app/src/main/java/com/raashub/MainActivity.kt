@@ -27,6 +27,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -1130,7 +1131,7 @@ private fun Detail(group: OnionGroup, health: Map<String, HealthResult>, onBack:
         TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text("Back") }
         Text(group.name, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
         Text("${group.urls.size} URLs • ${group.categories.joinToString { it.replaceFirstChar { ch -> ch.uppercase() } }}", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(vertical = 12.dp, bottom = 20.dp)) {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(top = 12.dp, bottom = 20.dp)) {
             items(group.entries, key = { it.url }) { entry ->
                 val result = health[entry.url]
                 val statusLabel = when (result?.status) {

@@ -624,6 +624,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        HealthCheckScheduler.schedule(this)
         createMonitoringNotificationChannel()
         runCatching {
             torBound = bindService(Intent(this, TorService::class.java), torConnection, BIND_AUTO_CREATE)
@@ -1431,9 +1432,49 @@ class HealthCheckService : Service() {
                         add(OnionEntry(url, item.optString("entity", "Unnamed source"), item.optString("source", "Source list"), item.optString("category", "other").lowercase()))
                     }
                 }.distinctBy { it.url.lowercase() }
+                val checkpoint = getSharedPreferences("raashub_scan_checkpoint", MODE_PRIVATE)
+                val previousReport = loadLatestHealthReport(this@HealthCheckService)
+                val wasInterrupted = checkpoint.getBoolean("active", false)
+                val completedUrls = if (wasInterrupted) {
+                    runCatching {
+                        val saved = JSONArray(checkpoint.getString("completed_urls", "[]"))
+                        buildSet { for (i in 0 until saved.length()) add(saved.optString(i).lowercase()) }
+                    }.getOrDefault(emptySet())
+                } else emptySet()
+                if (!wasInterrupted) {
+                    checkpoint.edit().putBoolean("active", true).putString("completed_urls", "[]")
+                        .putLong("started_at", System.currentTimeMillis()).commit()
+                }
+                // RaaSHub Priority Queue v1: offline first, then never-checked, then stale/error,
+                // then redirects, then healthy endpoints. Oldest checks win within each tier.
+                val rankedSources = sources.sortedWith(
+                    compareBy<OnionEntry> { entry ->
+                        val prior = previousReport?.results?.get(entry.url)
+                        when {
+                            prior == null -> 1
+                            prior.responseCode == null -> 0
+                            prior.status == "Server error" || prior.status == "Client error" -> 2
+                            prior.status == "Redirect" -> 3
+                            else -> 4
+                        }
+                    }.thenBy { entry ->
+                        previousReport?.results?.get(entry.url)?.checkedAt ?: 0L
+                    }.thenBy { it.url.lowercase() }
+                )
+                val pendingSources = rankedSources.filterNot { it.url.lowercase() in completedUrls }
                 val total = sources.size
-                update(0, total, "Background scan started: 0/$total", true)
-                val report = checkOnionSources(sources, { done, count ->
+                val resumedCount = completedUrls.size.coerceAtMost(total)
+                update(resumedCount, total, if (wasInterrupted) "Resuming interrupted scan: $resumedCount/$total already checkpointed" else "Background scan started: 0/$total", true)
+                if (pendingSources.isEmpty()) {
+                    val finalReport = previousReport ?: HealthReport(false, null, "No pending URLs remain.", emptyMap())
+                    saveLatestHealthReport(this@HealthCheckService, finalReport)
+                    checkpoint.edit().putBoolean("active", false).commit()
+                    update(total, total, "Completed: ${finalReport.message}", false)
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                    stopSelf(startId)
+                    return@launch
+                }
+                val report = checkOnionSources(pendingSources, { done, count ->
                     update(done, count, "Health check running: $done/$count (${if (count == 0) 0 else done * 100 / count}%)", true)
                 }, { workers, log ->
                     val active = workers.count { it.status == "Checking" }
@@ -1442,15 +1483,26 @@ class HealthCheckService : Service() {
                     val onionCount = partialResults.keys.count { Uri.parse(it).host?.endsWith(".onion", true) == true }
                     val clearCount = partialResults.size - onionCount
                     val partialMessage = "$crawler chunk $chunk/$chunkCount saved. $onionCount onion and $clearCount clear-web URLs have detailed results stored; remaining chunks continue."
-                    saveLatestHealthReport(this@HealthCheckService, HealthReport(true, null, partialMessage, partialResults))
-                    update(lastProgress, total, partialMessage, true, partialMessage, reportUpdated = true)
+                    val mergedResults = (previousReport?.results.orEmpty() + partialResults)
+                    saveLatestHealthReport(this@HealthCheckService, HealthReport(true, null, partialMessage, mergedResults))
+                    val doneKeys = (completedUrls + partialResults.keys.map { it.lowercase() }).distinct()
+                    checkpoint.edit().putString("completed_urls", JSONArray(doneKeys).toString())
+                        .putBoolean("active", true).commit()
+                    update(resumedCount + lastProgress, total, partialMessage, true, partialMessage, reportUpdated = true)
                 }
-                saveLatestHealthReport(this@HealthCheckService, report)
-                update(total, total, "Completed: ${report.message}", false)
+                val mergedFinalResults = previousReport?.results.orEmpty() + report.results
+                val finalReport = report.copy(results = mergedFinalResults)
+                saveLatestHealthReport(this@HealthCheckService, finalReport)
+                checkpoint.edit().putBoolean("active", false).putLong("completed_at", System.currentTimeMillis()).commit()
+                HealthCheckScheduler.schedule(this@HealthCheckService)
+                update(total, total, "Completed: ${finalReport.message}", false)
             } catch (error: Exception) {
                 val reason = "Scan failed: ${error.message ?: error.javaClass.simpleName}"
-                saveLatestHealthReport(this@HealthCheckService, HealthReport(false, null, reason, emptyMap()))
+                val retained = loadLatestHealthReport(this@HealthCheckService)
+                saveLatestHealthReport(this@HealthCheckService, HealthReport(false, null, reason, retained?.results.orEmpty()))
+                // Keep the checkpoint active so a later service restart can continue the unfinished queue.
                 update(lastProgress, lastProgress.coerceAtLeast(1), reason, false)
+                HealthCheckScheduler.schedule(this@HealthCheckService)
             }
             stopForeground(STOP_FOREGROUND_DETACH)
             stopSelf(startId)

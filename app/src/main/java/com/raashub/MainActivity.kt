@@ -214,7 +214,7 @@ private fun httpDateToIst(value: String): String = runCatching {
 }.getOrDefault(value)
 
 @OptIn(ExperimentalCoroutinesApi::class)
-private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (Int, Int) -> Unit, onWorkerUpdate: (List<WorkerProgress>, String) -> Unit): HealthReport {
+private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (Int, Int) -> Unit, onWorkerUpdate: (List<WorkerProgress>, String) -> Unit, onChunkComplete: (String, Int, Int, Map<String, HealthResult>) -> Unit = { _, _, _, _ -> }): HealthReport {
     val allSources = sources.distinctBy { it.url.trim().lowercase() }
     if (allSources.isEmpty()) return HealthReport(false, null, "No URLs are available to check.", emptyMap())
 
@@ -274,50 +274,58 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
             publishWorker(crawlerName, "Idle", log = "$crawlerName has no URLs assigned")
             return
         }
-        val effectiveSlotCount = minOf(slotCount, entries.size).coerceAtLeast(1)
-        val queue = Channel<OnionEntry>(capacity = effectiveSlotCount * 2)
-
-        coroutineScope {
-            val producer = launch {
-                try {
-                    entries.forEach { queue.send(it) }
-                } finally {
-                    queue.close()
+        // Deterministic, non-overlapping chunks: each crawler owns its own URL set.
+        // Chunk size is derived so each direct/onion crawler has at most 100 chunks.
+        val chunkSize = kotlin.math.ceil(entries.size / 100.0).toInt().coerceAtLeast(1)
+        val chunks = entries.distinctBy { it.url.trim().lowercase() }.chunked(chunkSize)
+        chunks.forEachIndexed { chunkIndex, chunkEntries ->
+            val effectiveSlotCount = minOf(slotCount, chunkEntries.size).coerceAtLeast(1)
+            val queue = Channel<OnionEntry>(capacity = effectiveSlotCount * 2)
+            coroutineScope {
+                val producer = launch {
+                    try { chunkEntries.forEach { queue.send(it) } }
+                    finally { queue.close() }
                 }
-            }
-            val slots = (0 until effectiveSlotCount).map { slotIndex ->
-                launch {
-                    val workerId = "$crawlerName · Slot ${slotIndex + 1}"
-                    publishWorker(workerId, "Waiting", log = "$workerId ready")
-                    for (entry in queue) {
-                        val active = activeUrls.incrementAndGet()
-                        peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
-                        publishWorker(workerId, "Checking", entry.url, "$workerId checking ${entry.url}")
-                        try {
-                            val result = try {
-                                checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
-                            } catch (e: Exception) {
-                                val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
-                                HealthResult("Offline", "No HTTP response", System.currentTimeMillis(), finalUrl = entry.url, error = reason)
-                            }
-                            results[entry.url] = result
-                            publishWorker(workerId, result.status, entry.url, "$workerId finished: ${result.status} — ${result.detail}")
-                        } finally {
-                            activeUrls.decrementAndGet()
-                            val done = completed.incrementAndGet()
-                            val now = System.currentTimeMillis()
-                            val previous = lastProgressUiUpdate.get()
-                            if (done == allSources.size || now - previous >= 250L) {
-                                if (lastProgressUiUpdate.compareAndSet(previous, now) || done == allSources.size) {
-                                    withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
+                val slots = (0 until effectiveSlotCount).map { slotIndex ->
+                    launch {
+                        val workerId = "$crawlerName · Chunk ${chunkIndex + 1} · Slot ${slotIndex + 1}"
+                        publishWorker(workerId, "Waiting", log = "$workerId ready")
+                        for (entry in queue) {
+                            val active = activeUrls.incrementAndGet()
+                            peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
+                            publishWorker(workerId, "Checking", entry.url, "$workerId checking ${entry.url}")
+                            try {
+                                val result = try {
+                                    checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
+                                } catch (e: Exception) {
+                                    val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                                    HealthResult("Offline", "No HTTP response", System.currentTimeMillis(), finalUrl = entry.url, error = reason)
+                                }
+                                results.putIfAbsent(entry.url, result)
+                                publishWorker(workerId, result.status, entry.url, "$workerId finished: ${result.status} — ${result.detail}")
+                            } finally {
+                                activeUrls.decrementAndGet()
+                                val done = completed.incrementAndGet()
+                                val now = System.currentTimeMillis()
+                                val previous = lastProgressUiUpdate.get()
+                                if (done == allSources.size || now - previous >= 250L) {
+                                    if (lastProgressUiUpdate.compareAndSet(previous, now) || done == allSources.size) {
+                                        withContext(Dispatchers.Main) { onProgress(done, allSources.size) }
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                producer.join()
+                slots.joinAll()
             }
-            producer.join()
-            slots.joinAll()
+            // Commit this chunk immediately. A process interruption never loses earlier chunks.
+            val chunkResults = results.toMap()
+            withContext(Dispatchers.Main) {
+                onChunkComplete(crawlerName, chunkIndex + 1, chunks.size, chunkResults)
+            }
+            publishWorker(crawlerName, "Chunk saved", log = "$crawlerName chunk ${chunkIndex + 1}/${chunks.size} saved (${chunkEntries.size} URLs; ${chunkResults.size} unique results total).")
         }
     }
 
@@ -1353,9 +1361,15 @@ class HealthCheckService : Service() {
                 update(0, total, "Background scan started: 0/$total", true)
                 val report = checkOnionSources(sources, { done, count ->
                     update(done, count, "Health check running: $done/$count (${if (count == 0) 0 else done * 100 / count}%)", true)
-                }) { workers, log ->
+                }, { workers, log ->
                     val active = workers.count { it.status == "Checking" }
                     update(lastProgress, total, "Active workers: $active • ${workers.size} worker slots", true, log)
+                }) { crawler, chunk, chunkCount, partialResults ->
+                    val onionCount = partialResults.keys.count { Uri.parse(it).host?.endsWith(".onion", true) == true }
+                    val clearCount = partialResults.size - onionCount
+                    val partialMessage = "$crawler chunk $chunk/$chunkCount saved. $onionCount onion and $clearCount clear-web URLs have detailed results stored; remaining chunks continue."
+                    saveLatestHealthReport(this@HealthCheckService, HealthReport(true, null, partialMessage, partialResults))
+                    update(lastProgress, total, partialMessage, true, partialMessage)
                 }
                 saveLatestHealthReport(this@HealthCheckService, report)
                 update(total, total, "Completed: ${report.message}", false)

@@ -38,6 +38,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.graphics.toArgb
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -812,25 +815,38 @@ private fun HubApp(sources: List<OnionEntry>) {
     // blends text/cards with the page background and makes labels unreadable.
     val scheme = if (darkMode) {
         darkColorScheme(
-            primary = Color(0xFFFF2D95), onPrimary = Color(0xFF0A0A0A),
-            secondary = Color(0xFF007BA7), onSecondary = Color(0xFFFFFFFF),
-            tertiary = Color(0xFFFF2D95),
-            background = Color(0xFF0A0A0A), surface = Color(0xFF111114),
-            surfaceVariant = Color(0xFF19191E), onSurface = Color(0xFFFFFFFF),
-            onSurfaceVariant = Color(0xFFB8B8C2), outline = Color(0xFF007BA7),
-            primaryContainer = Color(0xFF351326), onPrimaryContainer = Color(0xFFFFFFFF),
-            secondaryContainer = Color(0xFF102832), onSecondaryContainer = Color(0xFFFFFFFF)
+            primary = Color(0xFFD8BC83), onPrimary = Color(0xFF17140E),
+            secondary = Color(0xFF9C8B6B), onSecondary = Color(0xFF17140E),
+            tertiary = Color(0xFFE9D8B2),
+            background = Color(0xFF0B0D10), surface = Color(0xFF15191E),
+            surfaceVariant = Color(0xFF20262D), onSurface = Color(0xFFF4F0E8),
+            onSurfaceVariant = Color(0xFFB9B4AA), outline = Color(0xFF514B40),
+            primaryContainer = Color(0xFF30291D), onPrimaryContainer = Color(0xFFF4E7C9),
+            secondaryContainer = Color(0xFF292820), onSecondaryContainer = Color(0xFFE7DDC7)
         )
     } else {
         lightColorScheme(
-            primary = Color(0xFFFF2D95), onPrimary = Color(0xFF0A0A0A),
-            secondary = Color(0xFF007BA7), onSecondary = Color(0xFFFFFFFF),
-            tertiary = Color(0xFF007BA7), background = Color(0xFFF8F7FA),
-            surface = Color(0xFFFFFFFF), surfaceVariant = Color(0xFFF0EDF3),
-            onSurface = Color(0xFF0A0A0A), onSurfaceVariant = Color(0xFF45434A),
-            outline = Color(0xFF007BA7),
-            primaryContainer = Color(0xFFFFD8E9), onPrimaryContainer = Color(0xFF0A0A0A),
-            secondaryContainer = Color(0xFFD8F1FA), onSecondaryContainer = Color(0xFF0A0A0A)
+            primary = MaterialTheme.colorScheme.primary, onPrimary = Color(0xFF0A0A0A),
+            secondary = MaterialTheme.colorScheme.primary, onSecondary = Color(0xFFFFFFFF),
+            tertiary = Color(0xFF9A7D48), background = Color(0xFFF5F2EB),
+            surface = Color(0xFFFFFEFB), surfaceVariant = Color(0xFFECE7DC),
+            onSurface = Color(0xFF24231F), onSurfaceVariant = Color(0xFF625D53),
+            outline = Color(0xFFD1C8B8),
+            primaryContainer = Color(0xFFEDE2C9), onPrimaryContainer = Color(0xFF332A1C),
+            secondaryContainer = Color(0xFFE8E2D7), onSecondaryContainer = Color(0xFF38342C)
+        )
+    }
+    val premiumTypography = Typography().let { base ->
+        base.copy(
+            displayLarge = base.displayLarge.copy(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Bold, lineHeight = 54.sp),
+            headlineLarge = base.headlineLarge.copy(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Bold, lineHeight = 38.sp),
+            headlineMedium = base.headlineMedium.copy(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, lineHeight = 32.sp),
+            titleLarge = base.titleLarge.copy(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, lineHeight = 28.sp),
+            titleMedium = base.titleMedium.copy(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, lineHeight = 24.sp),
+            bodyLarge = base.bodyLarge.copy(fontFamily = FontFamily.SansSerif, lineHeight = 24.sp),
+            bodyMedium = base.bodyMedium.copy(fontFamily = FontFamily.SansSerif, lineHeight = 21.sp),
+            bodySmall = base.bodySmall.copy(fontFamily = FontFamily.SansSerif, lineHeight = 18.sp),
+            labelLarge = base.labelLarge.copy(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, lineHeight = 18.sp)
         )
     }
     var tab by remember { mutableStateOf(Tab.HOME) }
@@ -898,7 +914,17 @@ private fun HubApp(sources: List<OnionEntry>) {
             else -> { lastBackPressed = System.currentTimeMillis(); Toast.makeText(context, "Press back again to exit RaaSHub", Toast.LENGTH_SHORT).show() }
         }
     }
-    MaterialTheme(colorScheme = scheme) {
+    SideEffect {
+        (context as? Activity)?.window?.let { window ->
+            window.statusBarColor = scheme.background.toArgb()
+            window.navigationBarColor = scheme.background.toArgb()
+            WindowInsetsControllerCompat(window, window.decorView).apply {
+                isAppearanceLightStatusBars = !darkMode
+                isAppearanceLightNavigationBars = !darkMode
+            }
+        }
+    }
+    MaterialTheme(colorScheme = scheme, typography = premiumTypography) {
         if (showSetupPrompt) {
             AlertDialog(
                 onDismissRequest = {
@@ -931,13 +957,13 @@ private fun HubApp(sources: List<OnionEntry>) {
             )
         }
         Scaffold(
-            containerColor = Color.Transparent,
+            containerColor = MaterialTheme.colorScheme.background,
             bottomBar = {
                 Column {
                     Text("Developed With ♥️ AnonVox", Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.64f),
-                        tonalElevation = 0.dp
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 2.dp
                     ) {
                     Tab.entries.forEach { t ->
                         val icon = when (t) { Tab.HOME -> Icons.Default.Dashboard; Tab.SOURCES -> Icons.Default.Hub; Tab.ACTIVITY -> Icons.Default.Timeline; Tab.SETTINGS -> Icons.Default.Settings }
@@ -951,9 +977,9 @@ private fun HubApp(sources: List<OnionEntry>) {
                 Modifier.fillMaxSize()
                     .background(
                         if (darkMode) Brush.linearGradient(listOf(
-                            Color(0xFF0A0A0A), Color(0xFF0D111B), Color(0xFF101018)
+                            Color(0xFF0B0D10), Color(0xFF11161B), Color(0xFF171A1E)
                         )) else Brush.linearGradient(listOf(
-                            Color(0xFFF8F7FA), Color(0xFFF1F7FB), Color(0xFFFFF5FA)
+                            Color(0xFFF5F2EB), Color(0xFFEFEAE0), Color(0xFFF9F7F1)
                         ))
                     )
                     .padding(inset)
@@ -967,12 +993,12 @@ private fun HubApp(sources: List<OnionEntry>) {
                         androidx.compose.foundation.Image(painter = painterResource(id = R.drawable.raashub_logo), contentDescription = "RaaSHub logo", modifier = Modifier.size((LocalConfiguration.current.screenWidthDp * 0.12f).coerceIn(40f, 54f).dp).clip(RoundedCornerShape(14.dp)).background(Color.Black), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("RaaSHub", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
-                            Text("ONION SOURCE DIRECTORY", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, letterSpacing = 1.2.sp)
+                            Text("RaaSHub", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 27.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("INTELLIGENCE DIRECTORY", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, letterSpacing = 1.6.sp, maxLines = 1)
                         }
                     }
                     Spacer(Modifier.height(16.dp))
-                    Text("Explore sources. Check availability.", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                    Text("Explore sources. Check availability.", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 18.sp, lineHeight = 25.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
                 when {
                     selected != null -> Detail(selected!!, healthReport?.results.orEmpty(), onBack = { selected = null }, onCopy = { url ->

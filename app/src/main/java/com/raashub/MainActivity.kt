@@ -306,20 +306,26 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                         val workerId = "$crawlerName · Chunk ${chunkIndex + 1} · Slot ${slotIndex + 1}"
                         publishWorker(workerId, "Waiting", log = "$workerId ready")
                         for (entry in queue) {
-                            val active = activeUrls.incrementAndGet()
-                            peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
-                            publishWorker(workerId, "Checking", entry.url, "$workerId checking ${entry.url}")
+                            publishWorker(workerId, "Queued", entry.url, "$workerId queued ${entry.url}")
                             try {
-                                val result = try {
-                                    urlConcurrencyLimit.withPermit { checkUrlSchemes(entry.url, proxyPort, networkDispatcher) }
-                                } catch (e: Exception) {
-                                    val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
-                                    HealthResult("Unconfirmed", "No response after retry policy", System.currentTimeMillis(), finalUrl = entry.url, error = reason)
+                                val result = urlConcurrencyLimit.withPermit {
+                                    val active = activeUrls.incrementAndGet()
+                                    peakActiveUrls.updateAndGet { peak -> maxOf(peak, active) }
+                                    publishWorker(workerId, "Checking", entry.url, "$workerId checking ${entry.url}")
+                                    try {
+                                        try {
+                                            checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
+                                        } catch (e: Exception) {
+                                            val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                                            HealthResult("Unconfirmed", "No response after retry policy", System.currentTimeMillis(), finalUrl = entry.url, error = reason)
+                                        }
+                                    } finally {
+                                        activeUrls.decrementAndGet()
+                                    }
                                 }
                                 results.putIfAbsent(entry.url, result)
                                 publishWorker(workerId, result.status, entry.url, "$workerId finished: ${result.status} — ${result.detail}")
                             } finally {
-                                activeUrls.decrementAndGet()
                                 val done = completed.incrementAndGet()
                                 val now = System.currentTimeMillis()
                                 val previous = lastProgressUiUpdate.get()
@@ -1290,7 +1296,7 @@ private fun UrlReportDialog(
                     Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text("General", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 5.dp, bottom = 3.dp))
                         DetailLine("FQDN / Host", entry.host)
-                        DetailLine("Page title", result.title.ifBlank { "Not fetched in headers-only health check" })
+                        DetailLine("Page title", result.title.ifBlank { "No title found in the first 32 KB of HTML" })
                         DetailLine("Type / Category", entry.category)
                         DetailLine("Slug / URL", entry.url)
                         DetailLine("Enabled", "Enabled")
@@ -1321,7 +1327,15 @@ private fun UrlReportDialog(
                                 DetailLine(name, value)
                             }
                         }
-                        Text("Header values are shown as received by the health checker. Sensitive header values, if returned by the server, are visible in this report.", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp))
+                        Text("RaaSHub probe diagnostics", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 10.dp, bottom = 3.dp))
+                        if (result.probeDiagnostics.isEmpty()) {
+                            DetailLine("Probe diagnostics", "No additional protocol probe was required")
+                        } else {
+                            result.probeDiagnostics.toSortedMap(String.CASE_INSENSITIVE_ORDER).forEach { (name, value) ->
+                                DetailLine(name, value)
+                            }
+                        }
+                        Text("Response headers are received from the website. RaaSHub probe diagnostics are generated locally and are not server response headers.", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp))
                     }
                 }
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))

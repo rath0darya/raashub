@@ -80,6 +80,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.CoroutineDispatcher
 import java.io.BufferedReader
 import java.io.IOException
@@ -139,7 +141,8 @@ private data class HealthResult(
     val responseDate: String = "",
     val setCookiePresent: Boolean = false,
     val headers: Map<String, String> = emptyMap(),
-    val error: String = ""
+    val error: String = "",
+    val probeDiagnostics: Map<String, String> = emptyMap()
 )
 private data class HealthReport(val torAvailable: Boolean, val proxyPort: Int?, val message: String, val results: Map<String, HealthResult>)
 private data class WorkerProgress(val id: String, val status: String, val url: String = "")
@@ -163,7 +166,8 @@ private fun saveLatestHealthReport(context: android.content.Context, report: Hea
                 .put("httpVersion", result.httpVersion).put("finalUrl", result.finalUrl)
                 .put("title", result.title).put("contentType", result.contentType).put("server", result.server)
                 .put("etag", result.etag).put("lastModified", result.lastModified).put("responseDate", result.responseDate)
-                .put("setCookiePresent", result.setCookiePresent).put("headers", headers).put("error", result.error))
+                .put("setCookiePresent", result.setCookiePresent).put("headers", headers).put("error", result.error)
+                .put("probeDiagnostics", org.json.JSONObject().apply { result.probeDiagnostics.forEach { (key, value) -> put(key, value) } }))
         }
         root.put("results", results)
         context.getSharedPreferences(LATEST_LIVE_CHECK_PREFS, android.content.Context.MODE_PRIVATE)
@@ -182,6 +186,9 @@ private fun loadLatestHealthReport(context: android.content.Context): HealthRepo
         val headersObject = item.optJSONObject("headers") ?: org.json.JSONObject()
         val headers = linkedMapOf<String, String>()
         headersObject.keys().forEach { key -> headers[key] = headersObject.optString(key) }
+        val probeObject = item.optJSONObject("probeDiagnostics") ?: org.json.JSONObject()
+        val probeDiagnostics = linkedMapOf<String, String>()
+        probeObject.keys().forEach { key -> probeDiagnostics[key] = probeObject.optString(key) }
         val code = if (item.isNull("responseCode")) null else item.optInt("responseCode")
         results[item.optString("url")] = HealthResult(
             status = item.optString("status", "Unconfirmed").takeIf { it in setOf("Online", "Redirect", "Protected", "Client error", "Server error", "Informational", "Unconfirmed") } ?: "Unconfirmed",
@@ -191,7 +198,7 @@ private fun loadLatestHealthReport(context: android.content.Context): HealthRepo
             title = item.optString("title"), contentType = item.optString("contentType"),
             server = item.optString("server"), etag = item.optString("etag"),
             lastModified = item.optString("lastModified"), responseDate = item.optString("responseDate"),
-            setCookiePresent = item.optBoolean("setCookiePresent"), headers = headers, error = item.optString("error"))
+            setCookiePresent = item.optBoolean("setCookiePresent"), headers = headers, error = item.optString("error"), probeDiagnostics = probeDiagnostics)
     }
     val proxy = if (root.isNull("proxyPort")) null else root.optInt("proxyPort")
     HealthReport(root.optBoolean("torAvailable"), proxy, root.optString("message"), results)
@@ -240,8 +247,11 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
 
     // Tor uses a lower concurrency cap to avoid saturating the local Tor daemon.
     // Clear-web checks continue independently while Tor starts or is unavailable.
-    val clearWebSlots = 32
-    val onionSlots = 24
+    // Each 100-URL chunk can dispatch up to 40 concurrent URL checks in total.
+    // A shared semaphore prevents the independent crawlers from exceeding that cap.
+    val clearWebSlots = 40
+    val onionSlots = 40
+    val urlConcurrencyLimit = Semaphore(40)
     val networkDispatcher = Dispatchers.IO.limitedParallelism(96)
     val completed = AtomicInteger(0)
     val activeUrls = AtomicInteger(0)
@@ -301,7 +311,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
                             publishWorker(workerId, "Checking", entry.url, "$workerId checking ${entry.url}")
                             try {
                                 val result = try {
-                                    checkUrlSchemes(entry.url, proxyPort, networkDispatcher)
+                                    urlConcurrencyLimit.withPermit { checkUrlSchemes(entry.url, proxyPort, networkDispatcher) }
                                 } catch (e: Exception) {
                                     val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
                                     HealthResult("Unconfirmed", "No response after retry policy", System.currentTimeMillis(), finalUrl = entry.url, error = reason)
@@ -376,7 +386,7 @@ private suspend fun checkOnionSources(sources: List<OnionEntry>, onProgress: (In
     val responded = finalResults.values.count { it.responseCode != null }
     val offline = finalResults.size - responded
     val successful = finalResults.values.count { result -> result.responseCode?.let { it in 200..299 } == true }
-    val message = "Processed ${finalResults.size}/${allSources.size} URLs. Clear-web: ${clearWebSources.size} direct; onion: ${onionSources.size} through Tor only. Concurrency: up to 32 direct + 24 Tor jobs. Each protocol attempt has a 7-second network deadline; the alternate protocol is tried only if the first does not respond. Peak active URL jobs: ${peakActiveUrls.get()}. $responded responded ($successful successful 2xx); $offline had no HTTP response."
+    val message = "Processed ${finalResults.size}/${allSources.size} URLs. Clear-web: ${clearWebSources.size} direct; onion: ${onionSources.size} through Tor only. Concurrency: up to 40 URL checks total across both crawlers, in sequential 100-URL chunks. Each protocol attempt has a bounded timeout; the alternate protocol is tried only if the first does not respond. Peak active URL jobs: ${peakActiveUrls.get()}. $responded responded ($successful successful 2xx); $offline had no HTTP response."
     return HealthReport(onionSources.isEmpty() || onionProxyPort != null, onionProxyPort, message, finalResults)
 }
 private fun isTorCircuitReady(proxyPort: Int): Boolean {
@@ -456,7 +466,7 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
             put("x-raashub-$scheme-probe", "HTTP ${primary.responseCode}")
             put("x-raashub-$alternate-probe", "Not attempted (primary responded)")
         }
-        return primary.copy(headers = headers, detail = "${scheme.uppercase()}: HTTP ${primary.responseCode}")
+        return primary.copy(headers = primary.headers, probeDiagnostics = headers.filterKeys { it.startsWith("x-raashub-", ignoreCase = true) }, detail = "${scheme.uppercase()}: HTTP ${primary.responseCode}")
     }
 
     val fallback = probeWithRetry(alternateUrl)
@@ -471,7 +481,8 @@ private suspend fun checkUrlSchemes(urlText: String, proxyPort: Int?, networkDis
         detail = if (reachable) "${alternate.uppercase()}: HTTP ${fallback.responseCode}" else
             listOf(primary.error, fallback.error).filter { it.isNotBlank() }.distinct().joinToString("; ").ifBlank { "No HTTP response" },
         finalUrl = selected.finalUrl.ifBlank { if (reachable) alternateUrl else primaryUrl },
-        headers = headers,
+        headers = selected.headers,
+        probeDiagnostics = headers.filterKeys { it.startsWith("x-raashub-", ignoreCase = true) },
         status = selected.responseCode?.let { statusForHttpResponse(it, selected.headers) } ?: "Unconfirmed",
         error = if (reachable) "" else listOf(primary.error, fallback.error).filter { it.isNotBlank() }.distinct().joinToString("; ").ifBlank { selected.error }
     )
@@ -547,7 +558,7 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
                 val path = (uri.encodedPath?.takeIf { it.isNotEmpty() } ?: "/") + (uri.encodedQuery?.let { "?$it" } ?: "")
                 val defaultPort = if (scheme == "https") 443 else 80
                 val hostHeader = if (port == defaultPort) host else "$host:$port"
-                val request = "GET $path HTTP/1.1\r\nHost: $hostHeader\r\nUser-Agent: RaaSHub-HealthCheck/1.1\r\nRange: bytes=0-0\r\nConnection: close\r\n\r\n"
+                val request = "GET $path HTTP/1.1\r\nHost: $hostHeader\r\nUser-Agent: RaaSHub-HealthCheck/1.1\r\nAccept: text/html,application/xhtml+xml;q=0.9,*/*;q=0.1\r\nAccept-Encoding: identity\r\nRange: bytes=0-32767\r\nConnection: close\r\n\r\n"
                 connection.getOutputStream().write(request.toByteArray(StandardCharsets.ISO_8859_1))
                 connection.getOutputStream().flush()
                 val reader = BufferedReader(InputStreamReader(connection.getInputStream(), StandardCharsets.ISO_8859_1))
@@ -574,10 +585,27 @@ private fun checkOneOnionAttempt(urlText: String, proxyPort: Int?, readTimeoutMs
                         headers[name] = if (headers.containsKey(name)) (headers.getValue(name) + ", " + value).take(2048) else value
                     }
                 }
-                // Fast health-check mode reads response headers only. Avoid downloading
-                // page bodies from hundreds of slow onion services during status scans.
-                val title = ""
+                // Read only a bounded HTML prefix for metadata; never download the full page.
                 val contentType = headers["content-type"].orEmpty()
+                val isHtml = contentType.contains("text/html", true) || contentType.contains("application/xhtml+xml", true)
+                val title = if (isHtml) {
+                    val body = CharArray(32768)
+                    var used = 0
+                    var extracted = ""
+                    val titlePattern = Regex("(?is)<title\\b[^>]*>(.*?)</title\\s*>")
+                    while (used < body.size && extracted.isBlank()) {
+                        applyReadDeadline(connection, deadlineNanos)
+                        val count = reader.read(body, used, body.size - used)
+                        if (count < 0) break
+                        used += count
+                        val matchTitle = titlePattern.find(String(body, 0, used))
+                        if (matchTitle != null) {
+                            val rawTitle = matchTitle.groupValues[1].replace(Regex("(?is)<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
+                            extracted = android.text.Html.fromHtml(rawTitle, android.text.Html.FROM_HTML_MODE_LEGACY).toString().trim().take(512)
+                        }
+                    }
+                    extracted
+                } else ""
                 val server = headers["server"].orEmpty()
                 val detail = "HTTP $code • ${if (code in 200..399) "responded" else "server responded"}"
                 val status = statusForHttpResponse(code, headers)
